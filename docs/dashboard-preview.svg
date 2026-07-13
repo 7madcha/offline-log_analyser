@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620" role="img" aria-label="Dashboard preview">
+  <rect width="1100" height="620" fill="#f7f8fb"/>
+  <rect x="30" y="28" width="260" height="564" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="55" y="70" font-family="Arial" font-size="24" font-weight="700" fill="#111827">Offline Analyzer</text>
+  <text x="55" y="98" font-family="Arial" font-size="14" fill="#64748b">Local files and synthetic data only</text>
+  <rect x="55" y="135" width="190" height="36" rx="6" fill="#0f766e"/>
+  <text x="82" y="159" font-family="Arial" font-size="14" font-weight="700" fill="#ffffff">Run analysis</text>
+  <rect x="320" y="28" width="750" height="88" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="350" y="68" font-family="Arial" font-size="28" font-weight="700" fill="#111827">Offline Log Forensic Analyzer</text>
+  <text x="350" y="94" font-family="Arial" font-size="15" fill="#64748b">Simple local dashboard for alerts, incidents, and reports</text>
+  <g font-family="Arial">
+    <rect x="320" y="140" width="170" height="92" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="342" y="173" font-size="14" fill="#64748b">Events</text>
+    <text x="342" y="207" font-size="28" font-weight="700" fill="#111827">50,278</text>
+    <rect x="510" y="140" width="170" height="92" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="532" y="173" font-size="14" fill="#64748b">Alerts</text>
+    <text x="532" y="207" font-size="28" font-weight="700" fill="#111827">11</text>
+    <rect x="700" y="140" width="170" height="92" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="722" y="173" font-size="14" fill="#64748b">Incidents</text>
+    <text x="722" y="207" font-size="28" font-weight="700" fill="#111827">6</text>
+    <rect x="890" y="140" width="180" height="92" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+    <text x="912" y="173" font-size="14" fill="#64748b">Highest risk</text>
+    <text x="912" y="207" font-size="28" font-weight="700" fill="#7f1d1d">100</text>
+  </g>
+  <rect x="320" y="260" width="750" height="150" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+  <polyline points="350,375 420,350 490,358 560,305 630,330 700,285 770,295 840,270 910,310 1020,285" fill="none" stroke="#0f766e" stroke-width="4"/>
+  <text x="350" y="292" font-family="Arial" font-size="17" font-weight="700" fill="#111827">Events over time</text>
+  <rect x="320" y="435" width="360" height="126" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+  <rect x="350" y="485" width="110" height="34" fill="#0f766e"/>
+  <rect x="475" y="470" width="150" height="49" fill="#dc2626"/>
+  <text x="350" y="463" font-family="Arial" font-size="17" font-weight="700" fill="#111827">Allowed vs blocked</text>
+  <rect x="710" y="435" width="360" height="126" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+  <rect x="740" y="500" width="55" height="28" fill="#0f766e"/>
+  <rect x="810" y="475" width="55" height="53" fill="#d97706"/>
+  <rect x="880" y="455" width="55" height="73" fill="#dc2626"/>
+  <rect x="950" y="445" width="55" height="83" fill="#7f1d1d"/>
+  <text x="740" y="463" font-family="Arial" font-size="17" font-weight="700" fill="#111827">Incidents by severity</text>
+</svg>

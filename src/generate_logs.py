@@ -12,6 +12,7 @@ from src.utils import ensure_directory
 
 NORMAL_LABEL = "normal"
 SEED = 42
+PROFILE_CHOICES = ("normal", "noisy", "attack-heavy")
 
 
 def _ip_from(prefix: str, rng: np.random.Generator) -> str:
@@ -66,8 +67,18 @@ def _event(
 
 def _normal_event(rng: np.random.Generator, start: pd.Timestamp) -> dict[str, object]:
     day_offset = int(rng.integers(0, 7))
-    business_hour = int(rng.choice(np.arange(8, 19), p=np.array([0.05, 0.08, 0.1, 0.11, 0.11, 0.11, 0.11, 0.1, 0.09, 0.08, 0.06])))
-    timestamp = start + pd.Timedelta(days=day_offset, hours=business_hour, minutes=int(rng.integers(0, 60)), seconds=int(rng.integers(0, 60)))
+    business_hour = int(
+        rng.choice(
+            np.arange(8, 19),
+            p=np.array([0.05, 0.08, 0.1, 0.11, 0.11, 0.11, 0.11, 0.1, 0.09, 0.08, 0.06]),
+        )
+    )
+    timestamp = start + pd.Timedelta(
+        days=day_offset,
+        hours=business_hour,
+        minutes=int(rng.integers(0, 60)),
+        seconds=int(rng.integers(0, 60)),
+    )
     src_ip = _internal_ip(rng)
     dst_ip = _external_doc_ip(rng)
     protocol = "TCP"
@@ -115,7 +126,20 @@ def _normal_event(rng: np.random.Generator, start: pd.Timestamp) -> dict[str, ob
     )
 
 
-def _inject_scenarios(events: list[dict[str, object]], rng: np.random.Generator, start: pd.Timestamp) -> None:
+def _inject_noisy_scenarios(events: list[dict[str, object]], start: pd.Timestamp) -> None:
+    """Add suspicious-looking but smaller local-only samples."""
+    base = start + pd.Timedelta(days=1, hours=1, minutes=20)
+    for i in range(18):
+        events.append(_event(base + pd.Timedelta(seconds=i * 3), "10.0.0.45", "192.0.2.45", 43000 + i, 3389, "TCP", "BLOCK", 70, 0, "noisy_off_hours"))
+
+    scan_base = start + pd.Timedelta(days=2, hours=10, minutes=5)
+    for i, port in enumerate(range(8000, 8014)):
+        events.append(_event(scan_base + pd.Timedelta(seconds=i * 10), "10.0.0.46", "198.51.100.46", 44000 + i, port, "TCP", "BLOCK", 85, 0, "noisy_port_probe"))
+
+    events.append(_event(start + pd.Timedelta(days=3, hours=15, minutes=10), "192.168.20.20", "203.0.113.50", 45000, 443, "TCP", "ALLOW", 25_000_000, 9000, "noisy_large_transfer"))
+
+
+def _inject_scenarios(events: list[dict[str, object]], start: pd.Timestamp) -> None:
     brute_src = "10.0.0.99"
     base = start + pd.Timedelta(days=1, hours=2, minutes=13)
     for i in range(60):
@@ -150,12 +174,17 @@ def _inject_scenarios(events: list[dict[str, object]], rng: np.random.Generator,
     events.append(_event(combined_base + pd.Timedelta(minutes=6), combined_src, "198.51.100.201", 58000, 443, "TCP", "ALLOW", 95_000_000, 9000, "combined_incident"))
 
 
-def generate_firewall_logs(rows: int = 50_000, seed: int = SEED) -> pd.DataFrame:
-    """Generate synthetic firewall logs with normal and suspicious scenarios."""
+def generate_firewall_logs(rows: int = 50_000, seed: int = SEED, profile: str = "attack-heavy") -> pd.DataFrame:
+    """Generate synthetic firewall logs with a selectable local-only sample profile."""
+    if profile not in PROFILE_CHOICES:
+        raise ValueError(f"Unsupported profile: {profile}")
     rng = np.random.default_rng(seed)
     start = pd.Timestamp("2026-07-01 00:00:00")
     events = [_normal_event(rng, start) for _ in range(max(rows, 0))]
-    _inject_scenarios(events, rng, start)
+    if profile == "noisy":
+        _inject_noisy_scenarios(events, start)
+    elif profile == "attack-heavy":
+        _inject_scenarios(events, start)
     df = pd.DataFrame(events).sort_values("timestamp").reset_index(drop=True)
     return df
 
@@ -165,13 +194,14 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=50_000, help="Number of normal baseline rows to generate.")
     parser.add_argument("--output", default="data/synthetic/firewall_logs.csv", help="Output CSV path.")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed for reproducibility.")
+    parser.add_argument("--profile", choices=PROFILE_CHOICES, default="attack-heavy", help="Synthetic sample profile.")
     args = parser.parse_args()
 
     output_path = Path(args.output)
     ensure_directory(output_path.parent)
-    df = generate_firewall_logs(rows=args.rows, seed=args.seed)
+    df = generate_firewall_logs(rows=args.rows, seed=args.seed, profile=args.profile)
     df.to_csv(output_path, index=False, encoding="utf-8")
-    print(f"Generated {len(df):,} rows at {output_path}")
+    print(f"Generated {len(df):,} rows at {output_path} using profile '{args.profile}'")
 
 
 if __name__ == "__main__":

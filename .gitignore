@@ -11,3 +11,4 @@ outputs/alerts/*.csv
 outputs/incidents/*.csv
 outputs/reports/*.csv
 data/processed/*.csv
+outputs/reports/*.pdf

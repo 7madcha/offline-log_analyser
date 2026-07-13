@@ -45,7 +45,7 @@ def clean_logs(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     missing_values = int(working.isna().sum().sum())
 
     working = working.drop_duplicates().copy()
-    working["timestamp"] = pd.to_datetime(working["timestamp"], errors="coerce")
+    working["timestamp"] = pd.to_datetime(working["timestamp"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
     invalid_timestamps = int(working["timestamp"].isna().sum())
 
     for column in ("src_ip", "dst_ip", "protocol", "action"):

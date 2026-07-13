@@ -10,6 +10,7 @@ from src.correlator import correlate_alerts
 from src.detectors import run_all_detectors
 from src.exporter import export_alerts, export_cleaned_data, export_incidents
 from src.loader import load_logs
+from src.reporting import export_pdf_report
 from src.utils import load_config
 from src.validator import validate_columns, validate_dataset
 
@@ -30,6 +31,13 @@ def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root:
     cleaned_path = export_cleaned_data(cleaned_df, "data/processed/cleaned_logs.csv")
     alerts_path = export_alerts(alerts, output_root)
     incidents_path = export_incidents(incidents, output_root)
+    report_path = export_pdf_report(
+        cleaned_df,
+        alerts,
+        incidents,
+        Path(output_root) / "reports" / "incident_report.pdf",
+        cleaning_summary,
+    )
 
     return {
         "input_rows": len(raw_df),
@@ -40,6 +48,7 @@ def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root:
         "cleaned_path": cleaned_path,
         "alerts_path": alerts_path,
         "incidents_path": incidents_path,
+        "report_path": report_path,
     }
 
 
@@ -63,6 +72,9 @@ def main() -> None:
     print()
     print("Incidents file:")
     print(result["incidents_path"])
+    print()
+    print("PDF report:")
+    print(result["report_path"])
 
 
 if __name__ == "__main__":

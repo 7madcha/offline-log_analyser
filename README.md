@@ -1,25 +1,31 @@
 # Offline Log Forensic Analyzer
 
-Offline Log Forensic Analyzer is a local, offline Python project for analyzing static firewall logs stored in CSV files. It generates synthetic firewall events, validates and cleans the data, detects suspicious behaviors, correlates alerts into incidents, calculates explainable risk scores, and displays results in a Streamlit dashboard.
+Offline Log Forensic Analyzer is a local, offline Python project for analyzing static firewall logs stored in CSV files. It generates synthetic firewall events, validates and cleans the data, detects suspicious behaviors, correlates alerts into incidents, calculates explainable risk scores, and displays results in a simple Streamlit dashboard.
 
 The project is designed as a readable 3-4 week internship project. It does not require firewall access, VPN access, company infrastructure, credentials, real logs, external APIs, Docker, or a database.
 
 ## Main Features
 
-- Generate 50,000+ synthetic firewall events.
+- Generate synthetic firewall events with normal, noisy, and attack-heavy sample profiles.
 - Load and validate CSV firewall logs.
 - Normalize timestamps, actions, protocols, ports, byte fields, and IPv4 addresses.
 - Detect repeated blocked connections, port scans, host scans, large outbound transfers, and suspicious off-hours activity.
 - Correlate related alerts from the same source IP into incidents.
 - Calculate an explainable risk score from configured alert weights.
 - Export cleaned logs, alerts, and incidents as CSV files.
-- Explore results in a Streamlit and Plotly dashboard.
+- Export a local PDF incident and risk summary report.
+- Download a CSV schema template from the dashboard.
+- Explore results in a simple Streamlit and Plotly dashboard.
+
+## Dashboard Preview
+
+![Dashboard preview](docs/dashboard-preview.svg)
 
 ## Architecture
 
 The project is split into small modules under `src/`:
 
-- `generate_logs.py`: creates synthetic firewall logs.
+- `generate_logs.py`: creates synthetic firewall logs and sample profiles.
 - `loader.py`: loads CSV files and reports file errors.
 - `validator.py`: validates required columns and dataset shape.
 - `cleaner.py`: normalizes and filters invalid rows.
@@ -29,6 +35,7 @@ The project is split into small modules under `src/`:
 - `explanations.py`: builds evidence-based incident explanations.
 - `recommendations.py`: provides advisory next steps.
 - `exporter.py`: writes CSV outputs.
+- `reporting.py`: builds local PDF reports and CSV templates.
 - `utils.py`: shared configuration and helper functions.
 
 `main.py` runs the command-line pipeline. `app.py` runs the dashboard.
@@ -59,6 +66,14 @@ pip install -r requirements.txt
 python -m src.generate_logs --rows 50000 --output data/synthetic/firewall_logs.csv
 ```
 
+Sample profile options:
+
+```bash
+python -m src.generate_logs --profile normal --rows 8000 --output data/synthetic/normal_logs.csv
+python -m src.generate_logs --profile noisy --rows 12000 --output data/synthetic/noisy_logs.csv
+python -m src.generate_logs --profile attack-heavy --rows 50000 --output data/synthetic/firewall_logs.csv
+```
+
 The generator uses a reproducible seed and only uses fictional private or documentation IP ranges:
 
 - `10.0.0.0/8`
@@ -85,6 +100,7 @@ Generated files:
 - `data/processed/cleaned_logs.csv`
 - `outputs/alerts/alerts.csv`
 - `outputs/incidents/incidents.csv`
+- `outputs/reports/incident_report.pdf`
 
 ## Dashboard Execution
 
@@ -94,12 +110,16 @@ streamlit run app.py
 
 The dashboard includes:
 
-- CSV upload and default synthetic file loading.
-- Date, source IP, destination IP, protocol, action, severity, and alert type filters.
+- One-click Run analysis button.
+- Default file, upload CSV, and local sample profile selector.
+- Normal, noisy, and attack-heavy sample profiles.
+- Date, source IP, severity, and alert type filters.
 - Overview KPIs and charts.
 - Searchable alerts table with CSV download.
 - Incident table sorted by risk score with CSV download.
-- Investigation page with explanation, risk score breakdown, recommendations, timeline, and related raw events.
+- Investigation page with explanation, risk score breakdown, recommendations, improved timeline, and related raw events.
+- PDF report download.
+- CSV schema template download.
 
 ## Test Execution
 
@@ -107,7 +127,7 @@ The dashboard includes:
 pytest -v
 ```
 
-The tests cover loading, cleaning, detector thresholds, scoring, and incident correlation.
+The tests cover loading, cleaning, detector thresholds, scoring, incident correlation, sample generation, and local report generation.
 
 ## Project Structure
 
@@ -121,6 +141,8 @@ offline-log-analyzer/
 |-- .gitignore
 |-- .streamlit/
 |   `-- config.toml
+|-- docs/
+|   `-- dashboard-preview.svg
 |-- data/
 |   |-- raw/
 |   |-- processed/
@@ -141,6 +163,7 @@ offline-log-analyzer/
 |   |-- explanations.py
 |   |-- recommendations.py
 |   |-- exporter.py
+|   |-- reporting.py
 |   `-- utils.py
 `-- tests/
     |-- __init__.py
@@ -149,7 +172,9 @@ offline-log-analyzer/
     |-- test_cleaner.py
     |-- test_detectors.py
     |-- test_correlator.py
-    `-- test_scoring.py
+    |-- test_scoring.py
+    |-- test_generate_logs.py
+    `-- test_reporting.py
 ```
 
 ## Data Format
@@ -204,7 +229,7 @@ Severity mapping:
 80-100: Critical
 ```
 
-The incident output and dashboard show the score breakdown.
+The incident output, dashboard, and PDF report show the score breakdown.
 
 ## Limitations
 
