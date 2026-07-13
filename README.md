@@ -17,9 +17,6 @@ The project is designed as a readable 3-4 week internship project. It does not r
 - Download a CSV schema template from the dashboard.
 - Explore results in a simple Streamlit and Plotly dashboard.
 
-## Dashboard Preview
-
-![Dashboard preview](docs/dashboard-preview.svg)
 
 ## Architecture
 
@@ -141,8 +138,6 @@ offline-log-analyzer/
 |-- .gitignore
 |-- .streamlit/
 |   `-- config.toml
-|-- docs/
-|   `-- dashboard-preview.svg
 |-- data/
 |   |-- raw/
 |   |-- processed/
