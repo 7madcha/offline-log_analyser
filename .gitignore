@@ -1,0 +1,13 @@
+﻿.venv/
+.agents/
+.codex/
+__pycache__/
+.pytest_cache/
+*.pyc
+.streamlit/secrets.toml
+outputs/*.csv
+outputs/**/*.csv
+outputs/alerts/*.csv
+outputs/incidents/*.csv
+outputs/reports/*.csv
+data/processed/*.csv
