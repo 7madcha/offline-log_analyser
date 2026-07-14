@@ -18,6 +18,10 @@ The project is designed as a readable 3-4 week internship project. It does not r
 - Explore results in a simple Streamlit and Plotly dashboard.
 
 
+## Project File Guide
+
+See PROJECT_EXPLANATION.md for a plain-language explanation of every project file and implemented feature.
+
 ## Architecture
 
 The project is split into small modules under `src/`:
@@ -98,6 +102,10 @@ Generated files:
 - `outputs/alerts/alerts.csv`
 - `outputs/incidents/incidents.csv`
 - `outputs/reports/incident_report.pdf`
+
+## Dashboard Screenshots
+
+No dashboard image file is committed by default. To keep the repository code/data focused, run `streamlit run app.py` and capture screenshots manually when needed for reports or presentations.
 
 ## Dashboard Execution
 
