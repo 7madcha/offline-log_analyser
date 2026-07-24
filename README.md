@@ -67,6 +67,8 @@ pip install -r requirements.txt
 python -m src.generate_logs --rows 50000 --output data/synthetic/firewall_logs.csv
 ```
 
+You do not have to run this command if you use the dashboard. In the dashboard, choose `Generate fake logs`, select the sample type and row count, then click `Run analysis`. The dashboard creates `data/synthetic/firewall_logs.csv` automatically and analyzes it.
+
 Sample profile options:
 
 ```bash
@@ -115,9 +117,9 @@ streamlit run app.py
 
 The dashboard includes:
 
-- One-click Run analysis button.
-- Default file, upload CSV, and local sample profile selector.
-- Normal, noisy, and attack-heavy sample profiles.
+- One-click Run analysis button that runs the selected dashboard workflow.
+- Dashboard data sources: Generate fake logs, Upload CSV, or Use existing CSV file.
+- Normal, noisy, and attack-heavy fake log profiles with configurable row count.
 - Date, source IP, severity, and alert type filters.
 - Overview KPIs and charts.
 - Searchable alerts table with CSV download.
@@ -248,3 +250,24 @@ The incident output, dashboard, and PDF report show the score breakdown.
 ## Ethical Considerations
 
 This application is defensive and offline. It never scans a network, never connects to company infrastructure, never sends data to external APIs, never executes attacks, never blocks IP addresses, never modifies firewall configurations, never requires credentials, and never collects personal information.
+# AI and traffic analytics
+
+The analyzer now adds three offline views to the existing rule-based workflow:
+
+- **AI anomalies:** Isolation Forest groups each source IP into five-minute behavioral windows and compares connection counts, blocked ratios, destinations, ports, byte volumes, protocol ratios, and time of day. When at least five completely normal-labelled windows are available, they form the training baseline; otherwise the current dataset is used with a warning. A window is reported only when Isolation Forest predicts it as anomalous and its normalized 0-100 score meets the configured threshold. It is a lead for human investigation, not proof of an attack.
+- **Top source IPs:** ranks sources by event count and shows allow/block counts, destinations, ports, bytes, alerts, and incident risk.
+- **Top destination ports:** ranks contacted ports, shows traffic statistics, and labels common services such as HTTPS, SSH, and DNS.
+
+## Rule-Based Detection vs AI Anomaly Detection
+
+Rules detect known suspicious patterns that cross explicit thresholds. AI finds behavior that differs from the general baseline, including patterns for which no rule was written. They complement each other, and every AI result requires human validation. When labels are unavailable, the model learns from the currently loaded data, so synthetic, contaminated, or unrepresentative data can produce misleading results.
+
+Install and run:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe main.py --input data\synthetic\firewall_logs.csv
+.venv\Scripts\streamlit.exe run app.py
+```
+
+The CLI saves AI findings to `outputs/ai/anomalies.csv` and traffic summaries to `outputs/analytics/top_source_ips.csv` and `outputs/analytics/top_destination_ports.csv`. Change window size, estimator count, contamination, deterministic seed, and score threshold under `ai_detection` in `config.yaml`; change the ranking size under `analytics.top_n`.

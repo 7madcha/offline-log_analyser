@@ -20,7 +20,7 @@ Stores all required CSV columns and detection thresholds. The detector code read
 Runs the command-line pipeline. It loads config, loads a CSV, validates it, cleans it, runs detectors, correlates incidents, exports CSV files, creates a PDF report, and prints a summary.
 
 ### `app.py`
-Runs the Streamlit dashboard. It provides the local data selector, one-click Run analysis button, CSV upload, sample profiles, filters, charts, alert and incident tables, investigation timeline, CSV template download, and PDF report download.
+Runs the Streamlit dashboard. It provides the local data selector, one-click Run analysis button, fake log generation, CSV upload, existing-file analysis, filters, charts, alert and incident tables, investigation timeline, CSV template download, and PDF report download.
 
 ## Streamlit config
 
@@ -122,9 +122,22 @@ Tests the CSV schema template and confirms the local PDF report generator return
 ## Feature checklist
 
 - PDF report export for incidents and risk summary: implemented in `src/reporting.py`, `main.py`, and `app.py`.
-- Sample dataset selector for normal, noisy, and attack-heavy data: implemented in `src/generate_logs.py` and `app.py`.
+- Sample dataset selector for normal, noisy, and attack-heavy data: implemented in `src/generate_logs.py` and `app.py`. The dashboard can generate and save `data/synthetic/firewall_logs.csv`, replacing the manual generator command.
 - One-click Run analysis button: implemented in `app.py`.
 - Timeline improvements with clearer labels: implemented in `app.py` through `build_timeline`.
 - CSV schema template download: implemented in `src/reporting.py` and `app.py`.
 - Timestamp warning fix: implemented in `src/cleaner.py` with explicit timestamp format parsing.
 - Dashboard screenshots in README: documented as a manual screenshot note only; no image file is committed because the project should stay code/data focused.
+# New AI and traffic features
+
+Isolation Forest is an unsupervised machine-learning method that isolates unusual records with random decision trees. Here, one record describes one source IP during one configurable time window. The model uses only numeric behavior—not IP or timestamp strings—and runs entirely on the computer.
+
+The AI anomaly score is normalized from 0 to 100. Higher means more different from the learned baseline. When at least five windows contain only reliable normal labels (`normal`, `benign`, `legitimate`, `0`, or `false`), the model trains on those windows; otherwise it trains on all loaded windows and displays a warning. A result is marked anomalous only when Isolation Forest predicts `-1` and the normalized score meets the configured threshold. The export also includes the raw score and direct model prediction. The explanation compares actual window values with dataset medians and reports up to three strongest differences. An anomaly is not definitive evidence of an attack: a backup, maintenance job, synthetic dataset, or an unusual but legitimate user can look anomalous.
+
+## Rule-Based Detection vs AI Anomaly Detection
+
+Rule-based detectors recognize known patterns such as scans or repeated blocked connections. Isolation Forest finds behavior that differs from the general baseline. The two methods complement each other, and a human should validate AI findings against raw events and business context. With unlabelled data, the current file becomes the baseline; if it contains many attacks or too little representative traffic, results can be less reliable.
+
+The source-IP ranking counts events per source, then calculates allow/block totals, blocked ratio, unique targets and ports, byte totals, alert count, and maximum incident risk. The destination-port ranking counts contacts per port and adds source/destination diversity, actions, bytes, and a common-service name. Dashboard filters are applied before these summaries are calculated.
+
+Run the CLI with `.venv\Scripts\python.exe main.py --input data\synthetic\firewall_logs.csv` or start the dashboard with `.venv\Scripts\streamlit.exe run app.py`. New exports are written to `outputs/ai/anomalies.csv`, `outputs/analytics/top_source_ips.csv`, and `outputs/analytics/top_destination_ports.csv`. Settings live under `ai_detection`, `analytics`, and `working_hours` in `config.yaml`; invalid values fall back to safe defaults.

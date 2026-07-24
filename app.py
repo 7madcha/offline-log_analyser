@@ -10,13 +10,16 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.cleaner import clean_logs
+from src.ai_detector import detect_ai_anomalies
+from src.ai_features import build_behavioral_features
 from src.correlator import correlate_alerts
 from src.detectors import run_all_detectors
 from src.generate_logs import generate_firewall_logs
 from src.loader import load_logs
 from src.reporting import build_pdf_report, csv_schema_template
-from src.utils import load_config
+from src.utils import ensure_directory, load_config
 from src.validator import validate_columns, validate_dataset
+from src.traffic_analytics import top_destination_ports, top_source_ips
 
 DEFAULT_FILE = Path("data/synthetic/firewall_logs.csv")
 SEVERITY_ORDER = ["Low", "Medium", "High", "Critical"]
@@ -33,28 +36,28 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        .block-container { max-width: 1280px; padding-top: 1rem; }
-        .stApp { background: #f7f8fb; }
+        .block-container { max-width: 1180px; padding-top: 1rem; }
+        .stApp { background: #f8fafc; color: #111827; }
         [data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e5e7eb; }
+        [data-testid="stSidebar"] * { color: #111827; }
+        [data-testid="stSidebar"] .stCaptionContainer,
+        [data-testid="stSidebar"] .stCaptionContainer * { color: #64748b; }
         .simple-header {
             background: #ffffff;
             border: 1px solid #e5e7eb;
             border-radius: 8px;
-            padding: 1rem 1.15rem;
+            padding: 1rem;
             margin-bottom: 1rem;
         }
-        .simple-header h1 { font-size: 1.7rem; margin: 0 0 .25rem 0; }
-        .simple-header p { color: #64748b; margin: 0; }
+        .simple-header h1 { color: #111827; font-size: 1.6rem; margin: 0 0 .25rem 0; }
+        .simple-header p { color: #475569; margin: 0; }
         div[data-testid="stMetric"] {
             background: #ffffff;
             border: 1px solid #e5e7eb;
             border-radius: 8px;
-            padding: .8rem;
+            padding: .75rem;
         }
-        div[data-testid="stDataFrame"] {
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-        }
+        div[data-testid="stDataFrame"] { border: 1px solid #e5e7eb; border-radius: 8px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -79,11 +82,12 @@ def analyze_default_file(path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     return analyze_dataframe(load_logs(path))
 
 
-@st.cache_data(show_spinner=False)
-def analyze_sample_profile(name: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
-    """Generate and analyze a local synthetic sample profile."""
+def analyze_generated_profile(name: str, rows: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
+    """Generate fake logs locally, save them, and analyze them."""
     options = SAMPLE_PROFILES[name]
-    raw = generate_firewall_logs(rows=options["rows"], seed=options["seed"], profile=options["profile"])
+    raw = generate_firewall_logs(rows=rows, seed=options["seed"], profile=options["profile"])
+    ensure_directory(DEFAULT_FILE.parent)
+    raw.to_csv(DEFAULT_FILE, index=False, encoding="utf-8")
     return analyze_dataframe(raw)
 
 
@@ -92,44 +96,64 @@ def analyze_uploaded_file(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame, pd
     return analyze_dataframe(pd.read_csv(uploaded_file, dtype=str))
 
 
-def render_sidebar() -> tuple[str, str, object, bool]:
+def render_sidebar() -> tuple[str, str, int, object, bool]:
     """Render simple data controls."""
     st.sidebar.title("Offline Analyzer")
     st.sidebar.caption("Local files and synthetic data only.")
-    source = st.sidebar.radio("Data source", ["Default file", "Sample profile", "Upload CSV"])
-    profile = st.sidebar.selectbox("Sample", list(SAMPLE_PROFILES), index=2, disabled=source != "Sample profile")
-    uploaded = st.sidebar.file_uploader("CSV file", type=["csv"], disabled=source != "Upload CSV")
+    source = st.sidebar.radio("Choose input", ["Generate fake logs", "Upload CSV", "Use existing CSV file"])
+
+    profile = "Attack-heavy"
+    rows = int(SAMPLE_PROFILES[profile]["rows"])
+    uploaded = None
+
+    if source == "Generate fake logs":
+        profile = st.sidebar.selectbox("Fake log type", list(SAMPLE_PROFILES), index=2)
+        rows = st.sidebar.number_input(
+            "Rows",
+            min_value=100,
+            max_value=200_000,
+            value=int(SAMPLE_PROFILES[profile]["rows"]),
+            step=1_000,
+        )
+    elif source == "Upload CSV":
+        uploaded = st.sidebar.file_uploader("Select CSV", type=["csv"])
+    else:
+        st.sidebar.caption(f"Uses `{DEFAULT_FILE}`")
+
     run_clicked = st.sidebar.button("Run analysis", type="primary", width="stretch")
     st.sidebar.download_button(
-        "Download CSV template",
+        "CSV template",
         csv_schema_template(),
         file_name="firewall_log_template.csv",
         mime="text/csv",
         width="stretch",
     )
-    st.sidebar.info("This app does not scan networks, call external APIs, or connect to company systems.")
-    return source, profile, uploaded, run_clicked
+    st.sidebar.caption("Local only: no scanning, APIs, VPN, or company system access.")
+    return source, profile, int(rows), uploaded, run_clicked
 
 
-def get_analysis(source: str, profile: str, uploaded, run_clicked: bool):
-    """Return current analysis results, running analysis when requested or first loaded."""
-    if not run_clicked and "analysis" in st.session_state:
-        return st.session_state["analysis"]
+def get_analysis(source: str, profile: str, rows: int, uploaded, run_clicked: bool):
+    """Run analysis from the selected dashboard source."""
+    if not run_clicked:
+        if "analysis" in st.session_state:
+            return st.session_state["analysis"]
+        st.info("Choose a data source in the sidebar, then click Run analysis.")
+        return None
     if source == "Upload CSV":
         if uploaded is None:
             st.info("Upload a CSV file, then click Run analysis.")
             return None
         result = analyze_uploaded_file(uploaded)
-        label = uploaded.name
-    elif source == "Sample profile":
-        result = analyze_sample_profile(profile)
-        label = f"Synthetic sample: {profile}"
+        label = f"Uploaded file: {uploaded.name}"
+    elif source == "Generate fake logs":
+        result = analyze_generated_profile(profile, rows)
+        label = f"Generated fake logs: {profile} ({rows:,} rows)"
     else:
         if not DEFAULT_FILE.exists():
-            st.info("Generate the default synthetic file first or choose a sample profile.")
+            st.info("No existing CSV found. Choose Generate fake logs, then click Run analysis.")
             return None
         result = analyze_default_file(str(DEFAULT_FILE))
-        label = str(DEFAULT_FILE)
+        label = f"Existing local file: {DEFAULT_FILE}"
     st.session_state["analysis"] = (*result, label)
     return st.session_state["analysis"]
 
@@ -200,7 +224,7 @@ def render_header(label: str) -> None:
         f"""
         <div class="simple-header">
             <h1>Offline Log Forensic Analyzer</h1>
-            <p>Current source: {label}</p>
+            <p>{label}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -262,8 +286,18 @@ def render_alerts(alerts: pd.DataFrame) -> None:
     if visible.empty:
         st.info("No alerts to show.")
         return
-    columns = ["alert_id", "timestamp", "src_ip", "alert_type", "severity", "event_count", "score_contribution", "evidence"]
-    st.dataframe(visible[columns], width="stretch", hide_index=True)
+    columns = ["timestamp", "src_ip", "alert_type", "severity", "event_count", "score_contribution"]
+    st.dataframe(
+        visible[columns],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "event_count": st.column_config.NumberColumn("Events", format="%d"),
+            "score_contribution": st.column_config.NumberColumn("Score", format="%d"),
+        },
+    )
+    with st.expander("Show alert evidence"):
+        st.dataframe(visible[["alert_id", "evidence"]], width="stretch", hide_index=True)
     st.download_button("Download alerts CSV", visible.to_csv(index=False).encode("utf-8"), "alerts.csv", "text/csv")
 
 
@@ -281,6 +315,81 @@ def render_incidents(incidents: pd.DataFrame) -> None:
         column_config={"risk_score": st.column_config.ProgressColumn("Risk", min_value=0, max_value=100, format="%d")},
     )
     st.download_button("Download incidents CSV", visible.to_csv(index=False).encode("utf-8"), "incidents.csv", "text/csv")
+
+
+@st.cache_data(show_spinner=False)
+def cached_ai_analysis(logs: pd.DataFrame, model_config: dict, working_hours: dict) -> pd.DataFrame:
+    """Cache model fitting independently from the display-only score threshold."""
+    features = build_behavioral_features(logs, model_config["window_minutes"], working_hours["start_hour"], working_hours["end_hour"])
+    detector_config = dict(model_config)
+    detector_config["anomaly_threshold"] = 0
+    return detect_ai_anomalies(features, detector_config)
+
+
+def render_ai_analytics(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.DataFrame) -> None:
+    """Render local AI findings and filtered traffic summaries."""
+    config = load_config("config.yaml")
+    ai_config = dict(config["ai_detection"])
+    enabled = st.checkbox("Enable AI anomaly detection", value=bool(ai_config["enabled"]), help="Runs Isolation Forest locally. No log data leaves this computer.")
+    left, right = st.columns(2)
+    with left:
+        ai_config["anomaly_threshold"] = st.slider("AI score threshold", 0, 100, int(ai_config["anomaly_threshold"]))
+    with right:
+        ai_config["contamination"] = st.slider("Expected anomaly fraction", 0.001, 0.5, float(ai_config["contamination"]), 0.001)
+    sources = top_source_ips(logs, alerts, incidents, config["analytics"]["top_n"])
+    ports = top_destination_ports(logs, config["analytics"]["top_n"])
+    model_config = {key: value for key, value in ai_config.items() if key != "anomaly_threshold"}
+    ai_results = cached_ai_analysis(logs, model_config, config["working_hours"]) if enabled else pd.DataFrame()
+    if not ai_results.empty:
+        ai_results = ai_results.copy()
+        ai_results["is_ai_anomaly"] = ai_results["isolation_forest_prediction"].eq(-1) & ai_results["ai_anomaly_score"].ge(ai_config["anomaly_threshold"])
+    anomalies = ai_results[ai_results["is_ai_anomaly"]] if not ai_results.empty and "is_ai_anomaly" in ai_results else pd.DataFrame()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("AI anomalies", len(anomalies))
+    c2.metric("Highest AI score", f"{ai_results['ai_anomaly_score'].max():.2f}" if not ai_results.empty else "0.00")
+    c3.metric("Source IPs analyzed", logs["src_ip"].nunique() if "src_ip" in logs else 0)
+    c4.metric("Destination ports observed", logs["dst_port"].nunique() if "dst_port" in logs else 0)
+
+    st.subheader("AI anomaly analysis")
+    if not enabled:
+        st.info("AI detection is disabled. Traffic summaries are still available below.")
+    elif ai_results.empty:
+        st.warning(ai_results.attrs.get("warning", "AI detection could not be performed for this dataset."))
+    else:
+        st.warning(ai_results.attrs.get("warning", "AI anomalies require human validation."))
+        chart_data = ai_results.head(30).copy()
+        chart_data["window_label"] = chart_data["src_ip"].astype(str) + " | " + chart_data["window_start"].astype(str)
+        fig = px.bar(chart_data.sort_values("ai_anomaly_score"), x="ai_anomaly_score", y="window_label", orientation="h", title="Highest AI anomaly scores")
+        st.plotly_chart(chart_layout(fig, 520), width="stretch")
+        shown = anomalies if not anomalies.empty else ai_results.head(20)
+        columns = ["src_ip", "window_start", "connection_count", "unique_dst_ips", "unique_dst_ports", "blocked_ratio", "bytes_sent_total", "ai_anomaly_score", "is_ai_anomaly", "ai_explanation"]
+        st.dataframe(shown[columns], width="stretch", hide_index=True)
+        choices = [f"{row.src_ip} | {row.window_start} | score {row.ai_anomaly_score:.2f}" for row in shown.itertuples()]
+        if choices:
+            selected = st.selectbox("Explain a selected window", choices)
+            st.info(shown.iloc[choices.index(selected)]["ai_explanation"])
+        st.download_button("Download AI anomalies CSV", anomalies.to_csv(index=False).encode("utf-8"), "anomalies.csv", "text/csv")
+
+    st.subheader("Most active source IPs")
+    if sources.empty:
+        st.warning("Source-IP analytics are unavailable because no source IP data is present.")
+    else:
+        fig = px.bar(sources.sort_values("total_events"), x="total_events", y="src_ip", orientation="h", title="Top active source IPs")
+        st.plotly_chart(chart_layout(fig), width="stretch")
+        st.dataframe(sources, width="stretch", hide_index=True)
+        st.download_button("Download source IP analytics CSV", sources.to_csv(index=False).encode("utf-8"), "top_source_ips.csv", "text/csv")
+
+    st.subheader("Most frequently used destination ports")
+    if ports.empty:
+        st.warning("Port analytics are unavailable because no destination-port data is present.")
+    else:
+        port_chart = ports.copy()
+        port_chart["port_label"] = port_chart["dst_port"].astype(str) + " - " + port_chart["service_name"]
+        fig = px.bar(port_chart.sort_values("total_events"), x="total_events", y="port_label", orientation="h", title="Top destination ports")
+        st.plotly_chart(chart_layout(fig), width="stretch")
+        st.dataframe(ports, width="stretch", hide_index=True)
+        st.download_button("Download destination-port analytics CSV", ports.to_csv(index=False).encode("utf-8"), "top_destination_ports.csv", "text/csv")
 
 
 def build_timeline(related_alerts: pd.DataFrame, related_events: pd.DataFrame) -> pd.DataFrame:
@@ -347,10 +456,10 @@ def render_investigation(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd
 def main() -> None:
     st.set_page_config(page_title="Offline Log Forensic Analyzer", layout="wide")
     inject_styles()
-    source, profile, uploaded, run_clicked = render_sidebar()
+    source, profile, rows, uploaded, run_clicked = render_sidebar()
 
     try:
-        analysis = get_analysis(source, profile, uploaded, run_clicked)
+        analysis = get_analysis(source, profile, rows, uploaded, run_clicked)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -361,7 +470,7 @@ def main() -> None:
     filtered_logs, filtered_alerts, filtered_incidents = apply_filters(logs, alerts, incidents)
     render_header(label)
 
-    overview, alerts_tab, incidents_tab, investigation = st.tabs(["Overview", "Alerts", "Incidents", "Investigation"])
+    overview, alerts_tab, incidents_tab, investigation, analytics_tab = st.tabs(["Overview", "Alerts", "Incidents", "Investigation", "AI & Traffic Analytics"])
     with overview:
         render_overview(filtered_logs, filtered_alerts, filtered_incidents, summary)
     with alerts_tab:
@@ -370,6 +479,8 @@ def main() -> None:
         render_incidents(filtered_incidents)
     with investigation:
         render_investigation(filtered_logs, filtered_alerts, filtered_incidents)
+    with analytics_tab:
+        render_ai_analytics(filtered_logs, filtered_alerts, filtered_incidents)
 
 
 if __name__ == "__main__":

@@ -47,3 +47,20 @@ severity:
   medium_max: 59
   high_max: 79
   critical_max: 100
+
+# Local Isolation Forest settings. No data leaves this computer.
+ai_detection:
+  enabled: true
+  window_minutes: 5
+  n_estimators: 200
+  contamination: 0.02
+  random_state: 42
+  anomaly_threshold: 60
+
+analytics:
+  top_n: 10
+
+# Used when creating the AI off-hours behavioral feature.
+working_hours:
+  start_hour: 5
+  end_hour: 24
