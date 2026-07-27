@@ -9,6 +9,18 @@ required_columns:
   - bytes_sent
   - bytes_received
 
+schema_mapping:
+  aliases:
+    timestamp: [event_time, time, date, datetime, log_time, generated time, receive time, high resolution timestamp]
+    src_ip: [source_ip, source_address, source address, client_ip, src]
+    dst_ip: [destination_ip, destination_address, destination address, server_ip, dst]
+    src_port: [source_port, source port, client_port, sport]
+    dst_port: [destination_port, destination port, server_port, dport, port]
+    protocol: [transport_protocol, transport, proto]
+    action: [verdict, decision, disposition, result, status]
+    bytes_sent: [bytes sent, bytes_out, outbound_bytes, sent_bytes, out_bytes]
+    bytes_received: [bytes received, bytes_in, inbound_bytes, received_bytes, in_bytes]
+
 brute_force:
   blocked_attempts: 50
   window_minutes: 1

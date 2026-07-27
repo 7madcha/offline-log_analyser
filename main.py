@@ -16,6 +16,7 @@ from src.exporter import export_alerts, export_cleaned_data, export_dataframe, e
 from src.traffic_analytics import top_destination_ports, top_source_ips
 from src.loader import load_logs
 from src.reporting import export_pdf_report
+from src.schema_mapper import map_log_schema
 from src.utils import load_config
 from src.validator import validate_columns, validate_dataset
 
@@ -25,19 +26,22 @@ def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root:
     config = load_config(config_path)
     raw_df = load_logs(input_path)
     validate_dataset(raw_df)
-    validate_columns(raw_df, config["required_columns"])
+    mapping = map_log_schema(raw_df, config)
+    validate_columns(mapping.logs, ["timestamp", "src_ip"])
 
-    cleaned_df, cleaning_summary = clean_logs(raw_df)
+    cleaned_df, cleaning_summary = clean_logs(mapping.logs, set(mapping.mapped_columns))
     validate_dataset(cleaned_df)
 
-    alerts = run_all_detectors(cleaned_df, config)
+    alerts = run_all_detectors(cleaned_df, config, set(mapping.mapped_columns))
+    skipped_detectors = alerts.attrs.get("skipped_detectors", [])
     incidents = correlate_alerts(alerts, config)
     ai_cfg = config["ai_detection"]
     hours = config["working_hours"]
     features = build_behavioral_features(cleaned_df, ai_cfg["window_minutes"], hours["start_hour"], hours["end_hour"])
     if ai_cfg["enabled"]:
         ai_results = detect_ai_anomalies(features, ai_cfg)
-        anomalies = ai_results[ai_results["is_ai_anomaly"]].copy() if "is_ai_anomaly" in ai_results else pd.DataFrame()
+        anomaly_mask = ai_results["is_ai_anomaly"].fillna(False).astype(bool) if "is_ai_anomaly" in ai_results else pd.Series(False, index=ai_results.index)
+        anomalies = ai_results[anomaly_mask].copy()
     else:
         ai_results = pd.DataFrame()
         anomalies = pd.DataFrame(columns=["src_ip", "window_start", "ai_anomaly_score", "is_ai_anomaly", "ai_explanation"])
@@ -69,6 +73,9 @@ def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root:
         "most_active_source_ip": str(sources.iloc[0]["src_ip"]) if not sources.empty else "None",
         "most_frequent_destination_port": str(ports.iloc[0]["dst_port"]) if not ports.empty else "None",
         "cleaning_summary": cleaning_summary,
+        "mapped_columns": mapping.mapped_columns,
+        "unavailable_columns": mapping.unavailable_columns,
+        "skipped_detectors": skipped_detectors,
         "cleaned_path": cleaned_path,
         "alerts_path": alerts_path,
         "incidents_path": incidents_path,
@@ -81,7 +88,7 @@ def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze offline firewall logs.")
-    parser.add_argument("--input", required=True, help="Input firewall log CSV path.")
+    parser.add_argument("--input", required=True, help="Input firewall log CSV, JSON, JSONL, or NDJSON path.")
     parser.add_argument("--config", default="config.yaml", help="Configuration YAML path.")
     parser.add_argument("--output", default="outputs", help="Output root directory.")
     args = parser.parse_args()
@@ -97,6 +104,10 @@ def main() -> None:
     print(f"Highest AI anomaly score: {result['highest_ai_score']:.2f}")
     print(f"Most active source IP: {result['most_active_source_ip']}")
     print(f"Most frequently contacted destination port: {result['most_frequent_destination_port']}")
+    if result["unavailable_columns"]:
+        print(f"Unavailable source fields: {', '.join(result['unavailable_columns'])}")
+    if result["skipped_detectors"]:
+        print(f"Skipped detectors: {', '.join(result['skipped_detectors'])}")
     print()
     print("Alerts file:")
     print(result["alerts_path"])

@@ -283,19 +283,33 @@ def detect_off_hours_activity(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return pd.DataFrame(alerts, columns=ALERT_COLUMNS) if alerts else _empty_alerts()
 
 
-def run_all_detectors(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def run_all_detectors(df: pd.DataFrame, config: dict, available_columns: set[str] | None = None) -> pd.DataFrame:
     """Run every detector, combine results, remove duplicates, and assign IDs."""
-    frames = [
-        detect_repeated_blocked_connections(df, config),
-        detect_port_scan(df, config),
-        detect_host_scan(df, config),
-        detect_large_outbound_transfer(df, config),
-        detect_off_hours_activity(df, config),
-    ]
+    available = set(available_columns or df.attrs.get("available_columns", df.columns))
+    detector_requirements = {
+        "Repeated blocked connections": {"timestamp", "src_ip", "dst_ip", "dst_port", "action"},
+        "Port scan": {"timestamp", "src_ip", "dst_ip", "dst_port"},
+        "Host scan": {"timestamp", "src_ip", "dst_ip", "dst_port"},
+        "Large outbound transfer": {"timestamp", "src_ip", "dst_ip", "dst_port", "bytes_sent"},
+        "Suspicious off-hours activity": {"timestamp", "src_ip", "dst_ip", "dst_port", "action", "bytes_sent"},
+    }
+    detector_functions = {
+        "Repeated blocked connections": detect_repeated_blocked_connections,
+        "Port scan": detect_port_scan,
+        "Host scan": detect_host_scan,
+        "Large outbound transfer": detect_large_outbound_transfer,
+        "Suspicious off-hours activity": detect_off_hours_activity,
+    }
+    skipped = [name for name, required in detector_requirements.items() if not required.issubset(available)]
+    frames = [detector_functions[name](df, config) for name in detector_requirements if name not in skipped]
     alerts = pd.concat(frames, ignore_index=True) if frames else _empty_alerts()
     if alerts.empty:
-        return _empty_alerts()
+        result = _empty_alerts()
+        result.attrs["skipped_detectors"] = skipped
+        return result
     dedupe_columns = ["timestamp", "src_ip", "dst_ip", "alert_type", "first_seen", "last_seen"]
     alerts = alerts.drop_duplicates(subset=dedupe_columns).sort_values("timestamp").reset_index(drop=True)
     alerts["alert_id"] = [f"ALT-{i:06d}" for i in range(1, len(alerts) + 1)]
-    return alerts[ALERT_COLUMNS]
+    result = alerts[ALERT_COLUMNS]
+    result.attrs["skipped_detectors"] = skipped
+    return result

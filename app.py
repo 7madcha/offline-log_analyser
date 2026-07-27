@@ -15,8 +15,9 @@ from src.ai_features import build_behavioral_features
 from src.correlator import correlate_alerts
 from src.detectors import run_all_detectors
 from src.generate_logs import generate_firewall_logs
-from src.loader import load_logs
+from src.loader import load_logs, load_uploaded_logs
 from src.reporting import build_pdf_report, csv_schema_template
+from src.schema_mapper import map_log_schema
 from src.utils import ensure_directory, load_config
 from src.validator import validate_columns, validate_dataset
 from src.traffic_analytics import top_destination_ports, top_source_ips
@@ -68,10 +69,14 @@ def analyze_dataframe(raw: pd.DataFrame, config_path: str = "config.yaml") -> tu
     """Analyze a dataframe without contacting any external service."""
     config = load_config(config_path)
     validate_dataset(raw)
-    validate_columns(raw, config["required_columns"])
-    cleaned, summary = clean_logs(raw)
+    mapping = map_log_schema(raw, config)
+    validate_columns(mapping.logs, ["timestamp", "src_ip"])
+    cleaned, summary = clean_logs(mapping.logs, set(mapping.mapped_columns))
     validate_dataset(cleaned)
-    alerts = run_all_detectors(cleaned, config)
+    alerts = run_all_detectors(cleaned, config, set(mapping.mapped_columns))
+    cleaned.attrs["mapped_columns"] = mapping.mapped_columns
+    cleaned.attrs["unavailable_columns"] = mapping.unavailable_columns
+    cleaned.attrs["skipped_detectors"] = alerts.attrs.get("skipped_detectors", [])
     incidents = correlate_alerts(alerts, config)
     return cleaned, alerts, incidents, summary
 
@@ -92,15 +97,15 @@ def analyze_generated_profile(name: str, rows: int) -> tuple[pd.DataFrame, pd.Da
 
 
 def analyze_uploaded_file(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
-    """Analyze an uploaded local CSV file without saving it."""
-    return analyze_dataframe(pd.read_csv(uploaded_file, dtype=str))
+    """Analyze an uploaded local CSV or JSON log without saving it."""
+    return analyze_dataframe(load_uploaded_logs(uploaded_file))
 
 
 def render_sidebar() -> tuple[str, str, int, object, bool]:
     """Render simple data controls."""
     st.sidebar.title("Offline Analyzer")
     st.sidebar.caption("Local files and synthetic data only.")
-    source = st.sidebar.radio("Choose input", ["Generate fake logs", "Upload CSV", "Use existing CSV file"])
+    source = st.sidebar.radio("Choose input", ["Generate fake logs", "Upload log file", "Use existing log file"])
 
     profile = "Attack-heavy"
     rows = int(SAMPLE_PROFILES[profile]["rows"])
@@ -115,8 +120,8 @@ def render_sidebar() -> tuple[str, str, int, object, bool]:
             value=int(SAMPLE_PROFILES[profile]["rows"]),
             step=1_000,
         )
-    elif source == "Upload CSV":
-        uploaded = st.sidebar.file_uploader("Select CSV", type=["csv"])
+    elif source == "Upload log file":
+        uploaded = st.sidebar.file_uploader("Select CSV or JSON", type=["csv", "json", "jsonl", "ndjson"])
     else:
         st.sidebar.caption(f"Uses `{DEFAULT_FILE}`")
 
@@ -139,9 +144,9 @@ def get_analysis(source: str, profile: str, rows: int, uploaded, run_clicked: bo
             return st.session_state["analysis"]
         st.info("Choose a data source in the sidebar, then click Run analysis.")
         return None
-    if source == "Upload CSV":
+    if source == "Upload log file":
         if uploaded is None:
-            st.info("Upload a CSV file, then click Run analysis.")
+            st.info("Upload a CSV or JSON log file, then click Run analysis.")
             return None
         result = analyze_uploaded_file(uploaded)
         label = f"Uploaded file: {uploaded.name}"
@@ -251,6 +256,13 @@ def render_overview(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.Data
     c4.metric("Highest risk", max_risk)
 
     render_downloads(logs, alerts, incidents, summary)
+
+    unavailable = logs.attrs.get("unavailable_columns", [])
+    skipped = logs.attrs.get("skipped_detectors", [])
+    if unavailable:
+        st.info(f"Mapped the available fields. Missing source fields: {', '.join(unavailable)}.")
+    if skipped:
+        st.warning(f"Skipped detectors because their required fields are unavailable: {', '.join(skipped)}.")
 
     if logs.empty:
         st.info("No log events match the current filters.")

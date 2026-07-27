@@ -4,6 +4,12 @@ Offline Log Forensic Analyzer is a local, offline Python project for analyzing s
 
 The project is designed as a readable 3-4 week internship project. It does not require firewall access, VPN access, company infrastructure, credentials, real logs, external APIs, Docker, or a database.
 
+## Supported Log Formats
+
+The analyzer accepts local CSV, JSON, JSONL, and NDJSON files. It maps common alternative field names such as `source_ip`, `source_address`, `event_time`, `verdict`, and `bytes_out` into its internal schema before analysis. At minimum, an input needs a timestamp and source IP address. When a field is unavailable, only the detectors that require that field are skipped and the dashboard/CLI reports this clearly.
+
+Additional aliases can be configured under `schema_mapping.aliases` in `config.yaml`.
+
 ## Main Features
 
 - Generate synthetic firewall events with normal, noisy, and attack-heavy sample profiles.
