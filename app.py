@@ -16,11 +16,11 @@ from src.correlator import correlate_alerts
 from src.detectors import run_all_detectors
 from src.generate_logs import generate_firewall_logs
 from src.loader import load_logs, load_uploaded_logs
-from src.reporting import build_pdf_report, csv_schema_template
+from src.reporting import build_pdf_report, build_visual_pdf_report, csv_schema_template
 from src.schema_mapper import map_log_schema
 from src.utils import ensure_directory, load_config
 from src.validator import validate_columns, validate_dataset
-from src.traffic_analytics import top_destination_ports, top_source_ips
+from src.traffic_analytics import top_destination_ips, top_destination_ports, top_source_ips
 
 DEFAULT_FILE = Path("data/synthetic/firewall_logs.csv")
 SEVERITY_ORDER = ["Low", "Medium", "High", "Critical"]
@@ -236,13 +236,36 @@ def render_header(label: str) -> None:
     )
 
 
-def render_downloads(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.DataFrame, summary: dict[str, int]) -> None:
+def render_downloads(
+    logs: pd.DataFrame,
+    alerts: pd.DataFrame,
+    incidents: pd.DataFrame,
+    summary: dict[str, int],
+    source_label: str,
+    top_sources: pd.DataFrame | None = None,
+    top_ports: pd.DataFrame | None = None,
+    top_dst_ips: pd.DataFrame | None = None,
+) -> None:
     """Render report download controls."""
-    pdf = build_pdf_report(logs, alerts, incidents, summary)
-    st.download_button("Download PDF report", pdf, "incident_report.pdf", "application/pdf")
+    try:
+        pdf = build_visual_pdf_report(logs, alerts, incidents, summary, source_label, top_sources, top_ports, top_dst_ips)
+        st.download_button("Download PDF report", pdf, "incident_report.pdf", "application/pdf")
+    except Exception:
+        st.warning("Visual PDF layout is unavailable (Playwright/Chromium not installed). Downloading standard text-only PDF.")
+        pdf = build_pdf_report(logs, alerts, incidents, summary, top_sources, top_ports, top_dst_ips)
+        st.download_button("Download PDF report", pdf, "incident_report.pdf", "application/pdf")
 
 
-def render_overview(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.DataFrame, summary: dict[str, int]) -> None:
+def render_overview(
+    logs: pd.DataFrame,
+    alerts: pd.DataFrame,
+    incidents: pd.DataFrame,
+    summary: dict[str, int],
+    source_label: str,
+    top_sources: pd.DataFrame | None = None,
+    top_ports: pd.DataFrame | None = None,
+    top_dst_ips: pd.DataFrame | None = None,
+) -> None:
     """Render compact overview metrics and charts."""
     blocked = int((logs["action"] == "BLOCK").sum()) if not logs.empty else 0
     allowed = int((logs["action"] == "ALLOW").sum()) if not logs.empty else 0
@@ -255,7 +278,7 @@ def render_overview(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.Data
     c3.metric("Incidents", f"{len(incidents):,}", f"Critical: {critical}")
     c4.metric("Highest risk", max_risk)
 
-    render_downloads(logs, alerts, incidents, summary)
+    render_downloads(logs, alerts, incidents, summary, source_label, top_sources, top_ports, top_dst_ips)
 
     unavailable = logs.attrs.get("unavailable_columns", [])
     skipped = logs.attrs.get("skipped_detectors", [])
@@ -482,9 +505,16 @@ def main() -> None:
     filtered_logs, filtered_alerts, filtered_incidents = apply_filters(logs, alerts, incidents)
     render_header(label)
 
+    # Pre-compute traffic analytics for both the Overview tab and the PDF report
+    config = load_config("config.yaml")
+    top_n = config["analytics"]["top_n"]
+    rpt_top_sources = top_source_ips(filtered_logs, filtered_alerts, filtered_incidents, top_n)
+    rpt_top_ports = top_destination_ports(filtered_logs, top_n)
+    rpt_top_dst_ips = top_destination_ips(filtered_logs, top_n)
+
     overview, alerts_tab, incidents_tab, investigation, analytics_tab = st.tabs(["Overview", "Alerts", "Incidents", "Investigation", "AI & Traffic Analytics"])
     with overview:
-        render_overview(filtered_logs, filtered_alerts, filtered_incidents, summary)
+        render_overview(filtered_logs, filtered_alerts, filtered_incidents, summary, label, rpt_top_sources, rpt_top_ports, rpt_top_dst_ips)
     with alerts_tab:
         render_alerts(filtered_alerts)
     with incidents_tab:

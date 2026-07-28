@@ -45,3 +45,24 @@ def top_destination_ports(logs: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
     result["service_name"] = pd.to_numeric(result["dst_port"], errors="coerce").map(COMMON_PORTS).fillna("Unknown")
     columns = ["dst_port", "service_name", "total_events", "unique_source_ips", "unique_destination_ips", "allowed_events", "blocked_events", "blocked_ratio", "bytes_sent_total", "bytes_received_total"]
     return result.sort_values(["total_events", "dst_port"], ascending=[False, True]).head(max(1, int(top_n)))[columns].reset_index(drop=True)
+
+
+def top_destination_ips(logs: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    """Rank destination IPs by event count, including bytes and block ratios."""
+    data = _prepared(logs)
+    if data.empty or "dst_ip" not in data:
+        return pd.DataFrame(columns=["dst_ip", "total_events", "unique_source_ips", "allowed_events", "blocked_events", "blocked_ratio", "bytes_sent_total", "bytes_received_total"])
+    if "src_ip" not in data:
+        data["src_ip"] = pd.NA
+    result = data.groupby("dst_ip").agg(
+        total_events=("dst_ip", "size"),
+        unique_source_ips=("src_ip", "nunique"),
+        allowed_events=("allowed", "sum"),
+        blocked_events=("blocked", "sum"),
+        bytes_sent_total=("bytes_sent", "sum"),
+        bytes_received_total=("bytes_received", "sum"),
+    ).reset_index()
+    result["blocked_ratio"] = result["blocked_events"] / result["total_events"].replace(0, 1)
+    columns = ["dst_ip", "total_events", "unique_source_ips", "allowed_events", "blocked_events", "blocked_ratio", "bytes_sent_total", "bytes_received_total"]
+    return result.sort_values(["total_events", "dst_ip"], ascending=[False, True]).head(max(1, int(top_n)))[columns].reset_index(drop=True)
+
