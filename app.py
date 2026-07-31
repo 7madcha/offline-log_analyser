@@ -291,8 +291,20 @@ def render_overview(
         st.info("No log events match the current filters.")
         return
 
-    hourly = logs.set_index("timestamp").resample("h").size().reset_index(name="events")
-    st.plotly_chart(chart_layout(px.line(hourly, x="timestamp", y="events", title="Events over time")), width="stretch")
+    _time_range = logs["timestamp"].max() - logs["timestamp"].min()
+    if _time_range <= pd.Timedelta(minutes=10):
+        _freq, _freq_label = "s", "second"
+    elif _time_range <= pd.Timedelta(hours=2):
+        _freq, _freq_label = "min", "minute"
+    elif _time_range <= pd.Timedelta(days=2):
+        _freq, _freq_label = "h", "hour"
+    else:
+        _freq, _freq_label = "D", "day"
+    _binned = logs.set_index("timestamp").resample(_freq).size().reset_index(name="events")
+    st.plotly_chart(
+        chart_layout(px.line(_binned, x="timestamp", y="events", title=f"Events over time (per {_freq_label})")),
+        width="stretch",
+    )
 
     left, right = st.columns(2)
     with left:
