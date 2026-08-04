@@ -193,6 +193,11 @@ def build_html_report(
         _metric_card("Incidents", _format_count(len(incidents)), f"Critical: {_format_count(critical)}"),
         _metric_card("Highest risk", str(max_risk)),
         "</section>",
+    ]
+    _charts = _build_chart_html(logs, incidents, top_sources, top_ports)
+    if _charts:
+        sections.append(_section("Charts", _charts))
+    sections += [
         _section("Cleaning summary", _key_value_table(summary_rows)),
         _section("Top incidents", _dataframe_table(incident_rows, incident_columns, "No incidents to show.")),
         _section("Recent alerts", _dataframe_table(alerts.head(10), alert_columns, "No alerts to show.")),
@@ -355,6 +360,163 @@ def export_html_report(
     ensure_directory(output.parent)
     output.write_text(build_html_report(logs, alerts, incidents, cleaning_summary, source_label), encoding="utf-8")
     return output
+
+
+def _fig_to_img_tag(fig, width: int = 740, height: int = 300) -> str:
+    """Convert a Plotly figure to an inline base64 PNG <img> tag.
+
+    Returns an empty string silently if kaleido is not installed.
+    """
+    try:
+        import base64
+        import plotly.io as pio
+        png_bytes = pio.to_image(fig, format="png", width=width, height=height, scale=2)
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        return f'<img src="data:image/png;base64,{b64}" style="width:100%;display:block;" alt="chart">'
+    except Exception:
+        return ""
+
+
+def _build_chart_html(
+    logs: pd.DataFrame,
+    incidents: pd.DataFrame,
+    top_sources: pd.DataFrame | None,
+    top_ports: pd.DataFrame | None,
+) -> str:
+    """Build the charts HTML block to embed in the PDF report.
+
+    Each chart is rendered as a static PNG via kaleido.  If kaleido is
+    not installed every _fig_to_img_tag call returns '' and the block
+    ends up empty so the caller skips it entirely.
+    """
+    try:
+        import plotly.express as px
+    except ImportError:
+        return ""
+
+    _SEVERITY_ORDER = ["Low", "Medium", "High", "Critical"]
+    _SEVERITY_COLORS = {"Low": "#0f766e", "Medium": "#d97706", "High": "#dc2626", "Critical": "#7f1d1d"}
+    _LAYOUT = dict(
+        template="plotly_white",
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(color="#334155"),
+        margin=dict(l=50, r=20, t=40, b=50),
+    )
+
+    parts: list[str] = []
+
+    # ── 1. Events over time ───────────────────────────────────────────────────
+    if not logs.empty and "timestamp" in logs.columns:
+        _time_range = logs["timestamp"].max() - logs["timestamp"].min()
+        if _time_range <= pd.Timedelta(minutes=10):
+            _freq, _label = "s", "second"
+        elif _time_range <= pd.Timedelta(hours=2):
+            _freq, _label = "min", "minute"
+        elif _time_range <= pd.Timedelta(days=2):
+            _freq, _label = "h", "hour"
+        else:
+            _freq, _label = "D", "day"
+        binned = logs.set_index("timestamp").resample(_freq).size().reset_index(name="events")
+        fig = px.line(binned, x="timestamp", y="events", title=f"Events over time (per {_label})")
+        fig.update_layout(**_LAYOUT)
+        img = _fig_to_img_tag(fig, width=740, height=280)
+        if img:
+            parts.append(
+                f'<div style="margin-bottom:16px">'
+                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Events over time</p>'
+                f'{img}</div>'
+            )
+
+    # ── 2. Allowed vs Blocked + Incidents by severity (side-by-side) ──────────
+    pair: list[str] = []
+
+    if not logs.empty and "action" in logs.columns:
+        blocked = int((logs["action"] == "BLOCK").sum())
+        allowed = int((logs["action"] == "ALLOW").sum())
+        action_df = pd.DataFrame({"action": ["ALLOW", "BLOCK"], "count": [allowed, blocked]})
+        fig = px.bar(
+            action_df, x="action", y="count", title="Allowed vs Blocked",
+            color="action", color_discrete_map={"ALLOW": "#0f766e", "BLOCK": "#dc2626"},
+        )
+        fig.update_layout(**_LAYOUT, showlegend=False)
+        img = _fig_to_img_tag(fig, width=360, height=260)
+        if img:
+            pair.append(
+                f'<div style="flex:1;min-width:0">'
+                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Allowed vs Blocked</p>'
+                f'{img}</div>'
+            )
+
+    if not incidents.empty and "severity" in incidents.columns:
+        sev = incidents["severity"].value_counts().reindex(_SEVERITY_ORDER, fill_value=0).reset_index()
+        sev.columns = ["severity", "count"]
+        fig = px.bar(
+            sev, x="severity", y="count", title="Incidents by Severity",
+            color="severity", color_discrete_map=_SEVERITY_COLORS,
+        )
+        fig.update_layout(**_LAYOUT, showlegend=False)
+        img = _fig_to_img_tag(fig, width=360, height=260)
+        if img:
+            pair.append(
+                f'<div style="flex:1;min-width:0">'
+                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Incidents by Severity</p>'
+                f'{img}</div>'
+            )
+
+    if pair:
+        parts.append(f'<div style="display:flex;gap:16px;margin-bottom:16px">{"  ".join(pair)}</div>')
+
+    # ── 3. Top source IPs ─────────────────────────────────────────────────────
+    if (
+        top_sources is not None
+        and not top_sources.empty
+        and "src_ip" in top_sources.columns
+        and "total_events" in top_sources.columns
+    ):
+        fig = px.bar(
+            top_sources.sort_values("total_events"),
+            x="total_events", y="src_ip",
+            orientation="h", title="Top Active Source IPs",
+        )
+        h = max(220, len(top_sources) * 26 + 70)
+        fig.update_layout(**_LAYOUT, height=h)
+        img = _fig_to_img_tag(fig, width=740, height=h)
+        if img:
+            parts.append(
+                f'<div style="margin-bottom:16px">'
+                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Top Active Source IPs</p>'
+                f'{img}</div>'
+            )
+
+    # ── 4. Top destination ports ──────────────────────────────────────────────
+    if (
+        top_ports is not None
+        and not top_ports.empty
+        and "dst_port" in top_ports.columns
+        and "total_events" in top_ports.columns
+    ):
+        port_chart = top_ports.copy()
+        port_chart["port_label"] = (
+            port_chart["dst_port"].astype(str)
+            + (" - " + port_chart["service_name"] if "service_name" in port_chart.columns else "")
+        )
+        fig = px.bar(
+            port_chart.sort_values("total_events"),
+            x="total_events", y="port_label",
+            orientation="h", title="Top Destination Ports",
+        )
+        h = max(220, len(port_chart) * 26 + 70)
+        fig.update_layout(**_LAYOUT, height=h)
+        img = _fig_to_img_tag(fig, width=740, height=h)
+        if img:
+            parts.append(
+                f'<div style="margin-bottom:16px">'
+                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Top Destination Ports</p>'
+                f'{img}</div>'
+            )
+
+    return "".join(parts)
 
 
 def _split_pipe_values(value: object) -> list[str]:

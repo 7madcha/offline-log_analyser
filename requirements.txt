@@ -2,6 +2,7 @@ pandas
 numpy
 streamlit
 plotly
+kaleido
 pyyaml
 pytest
 scikit-learn
