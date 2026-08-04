@@ -1,4 +1,4 @@
-﻿.venv/
+.venv/
 .agents/
 .codex/
 __pycache__/
@@ -12,3 +12,16 @@ outputs/incidents/*.csv
 outputs/reports/*.csv
 data/processed/*.csv
 outputs/reports/*.pdf
+
+# IDE config — personal, not for version control
+.vscode/
+
+# Synthetic / generated data
+data/synthetic/
+
+# Temp output dirs
+outputs/palo_alto_validation/
+tests_temp/
+
+# Runtime logs
+*.log
