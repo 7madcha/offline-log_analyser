@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pandas as pd
+
+if TYPE_CHECKING:
+    from src.baseline import BaselineStore
 
 IDENTIFIER_COLUMNS = ["src_ip", "window_start"]
 TRAINING_METADATA_COLUMNS = ["normal_label_ratio", "has_reliable_normal_label"]
@@ -12,6 +17,10 @@ MODEL_FEATURES = [
     "average_bytes_sent", "average_bytes_received", "tcp_ratio", "udp_ratio",
     "activity_hour", "off_hours_indicator",
 ]
+BASELINE_FEATURES = [
+    "connection_count_vs_baseline_ratio",
+    "unique_ports_vs_baseline_ratio",
+]
 
 
 def build_behavioral_features(
@@ -19,9 +28,17 @@ def build_behavioral_features(
     window_minutes: int = 5,
     working_start_hour: int = 5,
     working_end_hour: int = 24,
+    baseline: "BaselineStore | None" = None,
 ) -> pd.DataFrame:
-    """Aggregate log events by source and time window into numerical features."""
-    columns = IDENTIFIER_COLUMNS + MODEL_FEATURES + TRAINING_METADATA_COLUMNS
+    """Aggregate log events by source and time window into numerical features.
+
+    When *baseline* is supplied (requires baselining enabled in config), two
+    extra ratio columns are added for the Isolation Forest so it can learn
+    asset-relative deviation in addition to absolute counts.
+    """
+    use_baseline_features = baseline is not None
+    active_features = MODEL_FEATURES + (BASELINE_FEATURES if use_baseline_features else [])
+    columns = IDENTIFIER_COLUMNS + active_features + TRAINING_METADATA_COLUMNS
     required = {"timestamp", "src_ip"}
     if logs is None or logs.empty or not required.issubset(logs.columns) or window_minutes <= 0:
         return pd.DataFrame(columns=columns)
@@ -68,4 +85,23 @@ def build_behavioral_features(
     else:
         result["off_hours_indicator"] = result["activity_hour"].between(working_end_hour, working_start_hour - 1).astype(int)
     result["has_reliable_normal_label"] = result["has_reliable_normal_label"] & result["normal_label_ratio"].eq(1.0)
+
+    if use_baseline_features:
+        def _bl_conn(src_ip: str) -> float:
+            bl = baseline.get(src_ip)  # type: ignore[union-attr]
+            return float(bl.event_count) if bl and bl.event_count > 0 else 0.0
+
+        def _bl_ports(src_ip: str) -> float:
+            bl = baseline.get(src_ip)  # type: ignore[union-attr]
+            return float(bl.unique_ports_median) if bl and bl.unique_ports_median > 0 else 0.0
+
+        bl_conn = result["src_ip"].astype(str).map(_bl_conn)
+        bl_ports = result["src_ip"].astype(str).map(_bl_ports)
+        result["connection_count_vs_baseline_ratio"] = (
+            result["connection_count"].div(bl_conn.replace(0, pd.NA)).fillna(1.0).clip(lower=0)
+        )
+        result["unique_ports_vs_baseline_ratio"] = (
+            result["unique_dst_ports"].div(bl_ports.replace(0, pd.NA)).fillna(1.0).clip(lower=0)
+        )
+
     return result[columns].sort_values(["window_start", "src_ip"]).reset_index(drop=True)

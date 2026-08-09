@@ -85,8 +85,8 @@ class BaselineStore:
         baseline_median:
             The raw median value from the baseline (None when falling back).
         """
-        min_events = int(self._cfg.get("min_history_events", 50))
-        multiplier = float(self._cfg.get("deviation_multiplier", 3.0))
+        min_events = int(self._cfg.get("min_history_events", 20))
+        multiplier = float(self._cfg.get("deviation_multiplier", 2.0))
         floor_val = float(self._cfg.get("min_threshold_floor", 5))
 
         bl = self._store.get(asset_key)
@@ -97,11 +97,12 @@ class BaselineStore:
         if median_val is None or median_val <= 0:
             return global_value, "global_config", None
 
-        # effective = max(global_floor, max(global_value, baseline * multiplier))
-        # Never drops below the global config threshold so we do not accidentally
-        # suppress alerts for hosts whose baseline is high but still suspicious.
+        # Pure per-asset threshold: baseline_median * multiplier, floored at
+        # min_threshold_floor.  This can be LOWER than the global config value
+        # (catching anomalies earlier for quiet hosts) or HIGHER (reducing
+        # false positives for naturally busy hosts like proxies/DNS servers).
         raw_effective = median_val * multiplier
-        effective = max(floor_val, max(global_value, raw_effective))
+        effective = max(floor_val, raw_effective)
         return effective, "per_asset_baseline", median_val
 
     @staticmethod
@@ -188,7 +189,17 @@ def compute_baseline(df: pd.DataFrame, config: dict) -> BaselineStore:
     bl_cfg: dict[str, Any] = config.get("baselining", {})
     group_by: str = str(bl_cfg.get("group_by", "src_ip"))
     prefix: int = int(bl_cfg.get("subnet_prefix_length", 24))
-    window_minutes: int = int(config.get("ai_detection", {}).get("window_minutes", 5))
+
+    # Each metric is compared against a detector that has its own window size
+    # (e.g. brute_force runs on 1-minute windows, port_scan on 5-minute
+    # windows). Bucketing every metric into one shared window size would
+    # silently miscalibrate whichever detector's window differs from it, so
+    # each metric gets its own window length pulled from that detector's
+    # config, falling back to the AI window if a section is missing.
+    default_window = int(config.get("ai_detection", {}).get("window_minutes", 5))
+    blocked_window = int(config.get("brute_force", {}).get("window_minutes", default_window))
+    ports_window = int(config.get("port_scan", {}).get("window_minutes", default_window))
+    dsts_window = int(config.get("host_scan", {}).get("window_minutes", default_window))
 
     baselines: dict[str, AssetBaseline] = {}
 
@@ -219,45 +230,43 @@ def compute_baseline(df: pd.DataFrame, config: dict) -> BaselineStore:
     data["_asset_key"] = data["src_ip"].astype(str).apply(
         lambda ip: _get_asset_key(ip, group_by, prefix)
     )
-    data["_window"] = data["timestamp"].dt.floor(f"{window_minutes}min")
     data["_is_blocked"] = (data["action"] == "BLOCK").astype(int)
 
-    # Aggregate per (asset_key, window) to get per-window feature series
-    grouped = data.groupby(["_asset_key", "_window"], dropna=False)
-    per_window = grouped.agg(
-        _blocked=("_is_blocked", "sum"),
-        _unique_ports=("dst_port", "nunique"),
-        _unique_dsts=("dst_ip", "nunique"),
-    ).reset_index()
+    def _per_window_median(window_minutes: int, value_col: str, agg: str) -> pd.Series:
+        """Median of *value_col* aggregated by *agg* over asset/window buckets."""
+        window_col = data["timestamp"].dt.floor(f"{window_minutes}min")
+        grouped = data.groupby(["_asset_key", window_col], dropna=False)[value_col].agg(agg)
+        return grouped.groupby("_asset_key").median()
+
+    def _per_window_mad(window_minutes: int, value_col: str, agg: str, medians: pd.Series) -> pd.Series:
+        window_col = data["timestamp"].dt.floor(f"{window_minutes}min")
+        grouped = data.groupby(["_asset_key", window_col], dropna=False)[value_col].agg(agg)
+        deviations = (grouped - grouped.index.get_level_values("_asset_key").map(medians)).abs()
+        return deviations.groupby("_asset_key").median()
+
+    blocked_medians = _per_window_median(blocked_window, "_is_blocked", "sum")
+    blocked_mads = _per_window_mad(blocked_window, "_is_blocked", "sum", blocked_medians)
+    ports_medians = _per_window_median(ports_window, "dst_port", "nunique")
+    ports_mads = _per_window_mad(ports_window, "dst_port", "nunique", ports_medians)
+    dsts_medians = _per_window_median(dsts_window, "dst_ip", "nunique")
+    dsts_mads = _per_window_mad(dsts_window, "dst_ip", "nunique", dsts_medians)
 
     # Per-asset 95th-percentile bytes_sent (event-level, not window-level)
-    bytes_p95 = (
-        data.groupby("_asset_key", dropna=False)["bytes_sent"]
-        .quantile(0.95)
-        .rename("_bytes_p95")
-    )
-    event_counts = data.groupby("_asset_key", dropna=False).size().rename("_event_count")
+    bytes_p95 = data.groupby("_asset_key", dropna=False)["bytes_sent"].quantile(0.95)
+    event_counts = data.groupby("_asset_key", dropna=False).size()
 
-    # Build one AssetBaseline per asset key
-    for asset_key, win_group in per_window.groupby("_asset_key"):
+    for asset_key in event_counts.index:
         asset_key_str = str(asset_key)
-        n_events = int(event_counts.get(asset_key_str, 0))
-
-        blocked_med, blocked_mad = _median_and_mad(win_group["_blocked"].astype(float))
-        ports_med, ports_mad = _median_and_mad(win_group["_unique_ports"].astype(float))
-        dsts_med, dsts_mad = _median_and_mad(win_group["_unique_dsts"].astype(float))
-        b_p95 = float(bytes_p95.get(asset_key_str, 0.0))
-
         baselines[asset_key_str] = AssetBaseline(
             asset_key=asset_key_str,
-            event_count=n_events,
-            blocked_rate_median=blocked_med,
-            blocked_rate_mad=blocked_mad,
-            unique_ports_median=ports_med,
-            unique_ports_mad=ports_mad,
-            unique_dsts_median=dsts_med,
-            unique_dsts_mad=dsts_mad,
-            bytes_sent_p95=b_p95,
+            event_count=int(event_counts.get(asset_key, 0)),
+            blocked_rate_median=float(blocked_medians.get(asset_key, 0.0)),
+            blocked_rate_mad=float(blocked_mads.get(asset_key, 0.0)),
+            unique_ports_median=float(ports_medians.get(asset_key, 0.0)),
+            unique_ports_mad=float(ports_mads.get(asset_key, 0.0)),
+            unique_dsts_median=float(dsts_medians.get(asset_key, 0.0)),
+            unique_dsts_mad=float(dsts_mads.get(asset_key, 0.0)),
+            bytes_sent_p95=float(bytes_p95.get(asset_key, 0.0)),
         )
 
     return BaselineStore(baselines, bl_cfg)

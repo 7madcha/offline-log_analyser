@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.scoring import score_for_alert_type, score_to_severity
+
+if TYPE_CHECKING:
+    from src.baseline import BaselineStore
 
 ALERT_COLUMNS = [
     "alert_id",
@@ -91,26 +94,51 @@ def _first_unique_value_window(
     return None
 
 
-def detect_repeated_blocked_connections(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def detect_repeated_blocked_connections(
+    df: pd.DataFrame,
+    config: dict,
+    baseline: "BaselineStore | None" = None,
+) -> pd.DataFrame:
     """Detect repeated blocked connections from one source in a short window."""
     cfg = config["brute_force"]
-    threshold = int(cfg["blocked_attempts"])
+    global_threshold = int(cfg["blocked_attempts"])
     window = int(cfg["window_minutes"])
     ports = set(map(int, cfg["destination_ports"]))
+    bl_enabled = baseline is not None and config.get("baselining", {}).get("enabled", False)
     blocked = df[(df["action"] == "BLOCK") & (df["dst_port"].isin(ports))].copy()
     if blocked.empty:
         return _empty_alerts()
 
     alerts: list[dict[str, Any]] = []
     candidate_sources = blocked["src_ip"].value_counts()
-    candidate_sources = candidate_sources[candidate_sources >= threshold].index
+    candidate_sources = candidate_sources[candidate_sources >= 1].index
     for src_ip, group in blocked[blocked["src_ip"].isin(candidate_sources)].sort_values("timestamp").groupby("src_ip"):
+        if bl_enabled:
+            threshold, threshold_source, baseline_median = baseline.get_effective_threshold(  # type: ignore[union-attr]
+                str(src_ip), "blocked_rate", float(global_threshold)
+            )
+            threshold = int(threshold)
+        else:
+            threshold, threshold_source, baseline_median = global_threshold, "global_config", None
+
+        if len(group) < threshold:
+            continue
         indexed = group.set_index("timestamp").sort_index()
         counts = indexed["dst_port"].rolling(f"{window}min").count()
         if counts.max() >= threshold:
             end_time = counts[counts >= threshold].index[0]
             start_time = end_time - pd.Timedelta(minutes=window)
             window_df = group[(group["timestamp"] > start_time) & (group["timestamp"] <= end_time)]
+            evidence: dict[str, Any] = {
+                "blocked_connections": int(len(window_df)),
+                "target_ports": sorted(window_df["dst_port"].unique().astype(int).tolist()),
+                "interpretation": "Possible brute-force or automated connection attempts",
+                "threshold_source": threshold_source,
+                "effective_threshold": threshold,
+                "observed_value": int(len(window_df)),
+            }
+            if baseline_median is not None:
+                evidence["asset_baseline_value"] = round(baseline_median, 2)
             alerts.append(
                 _alert(
                     timestamp=end_time,
@@ -119,11 +147,7 @@ def detect_repeated_blocked_connections(df: pd.DataFrame, config: dict) -> pd.Da
                     alert_type="Repeated blocked connections",
                     event_count=len(window_df),
                     window_minutes=window,
-                    evidence={
-                        "blocked_connections": int(len(window_df)),
-                        "target_ports": sorted(window_df["dst_port"].unique().astype(int).tolist()),
-                        "interpretation": "Possible brute-force or automated connection attempts",
-                    },
+                    evidence=evidence,
                     config=config,
                     first_seen=window_df["timestamp"].min(),
                     last_seen=window_df["timestamp"].max(),
@@ -134,19 +158,41 @@ def detect_repeated_blocked_connections(df: pd.DataFrame, config: dict) -> pd.Da
     return pd.DataFrame(alerts, columns=ALERT_COLUMNS) if alerts else _empty_alerts()
 
 
-def detect_port_scan(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def detect_port_scan(
+    df: pd.DataFrame,
+    config: dict,
+    baseline: "BaselineStore | None" = None,
+) -> pd.DataFrame:
     """Detect one source contacting many destination ports in a window."""
     cfg = config["port_scan"]
-    threshold = int(cfg["unique_ports"])
+    global_threshold = int(cfg["unique_ports"])
     window = int(cfg["window_minutes"])
+    bl_enabled = baseline is not None and config.get("baselining", {}).get("enabled", False)
     alerts: list[dict[str, Any]] = []
     candidate_sources = df["src_ip"].value_counts()
-    candidate_sources = candidate_sources[candidate_sources >= threshold].index
+    candidate_sources = candidate_sources[candidate_sources >= 1].index
     for src_ip, group in df[df["src_ip"].isin(candidate_sources)].sort_values("timestamp").groupby("src_ip"):
+        if bl_enabled:
+            threshold, threshold_source, baseline_median = baseline.get_effective_threshold(  # type: ignore[union-attr]
+                str(src_ip), "unique_ports", float(global_threshold)
+            )
+            threshold = int(threshold)
+        else:
+            threshold, threshold_source, baseline_median = global_threshold, "global_config", None
+
         window_df = _first_unique_value_window(group, "dst_port", threshold, window)
         if window_df is None:
             continue
         unique_ports = sorted(window_df["dst_port"].unique().astype(int).tolist())
+        evidence: dict[str, Any] = {
+            "unique_destination_ports": len(unique_ports),
+            "ports_sample": unique_ports[:50],
+            "threshold_source": threshold_source,
+            "effective_threshold": threshold,
+            "observed_value": len(unique_ports),
+        }
+        if baseline_median is not None:
+            evidence["asset_baseline_value"] = round(baseline_median, 2)
         alerts.append(
             _alert(
                 timestamp=window_df["timestamp"].max(),
@@ -155,7 +201,7 @@ def detect_port_scan(df: pd.DataFrame, config: dict) -> pd.DataFrame:
                 alert_type="Port scan",
                 event_count=len(window_df),
                 window_minutes=window,
-                evidence={"unique_destination_ports": len(unique_ports), "ports_sample": unique_ports[:50]},
+                evidence=evidence,
                 config=config,
                 first_seen=window_df["timestamp"].min(),
                 last_seen=window_df["timestamp"].max(),
@@ -166,19 +212,41 @@ def detect_port_scan(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return pd.DataFrame(alerts, columns=ALERT_COLUMNS) if alerts else _empty_alerts()
 
 
-def detect_host_scan(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def detect_host_scan(
+    df: pd.DataFrame,
+    config: dict,
+    baseline: "BaselineStore | None" = None,
+) -> pd.DataFrame:
     """Detect one source contacting many destination IPs in a window."""
     cfg = config["host_scan"]
-    threshold = int(cfg["unique_destinations"])
+    global_threshold = int(cfg["unique_destinations"])
     window = int(cfg["window_minutes"])
+    bl_enabled = baseline is not None and config.get("baselining", {}).get("enabled", False)
     alerts: list[dict[str, Any]] = []
     candidate_sources = df["src_ip"].value_counts()
-    candidate_sources = candidate_sources[candidate_sources >= threshold].index
+    candidate_sources = candidate_sources[candidate_sources >= 1].index
     for src_ip, group in df[df["src_ip"].isin(candidate_sources)].sort_values("timestamp").groupby("src_ip"):
+        if bl_enabled:
+            threshold, threshold_source, baseline_median = baseline.get_effective_threshold(  # type: ignore[union-attr]
+                str(src_ip), "unique_dsts", float(global_threshold)
+            )
+            threshold = int(threshold)
+        else:
+            threshold, threshold_source, baseline_median = global_threshold, "global_config", None
+
         window_df = _first_unique_value_window(group, "dst_ip", threshold, window)
         if window_df is None:
             continue
         destinations = sorted(window_df["dst_ip"].astype(str).unique().tolist())
+        evidence: dict[str, Any] = {
+            "unique_destinations": len(destinations),
+            "destinations_sample": destinations[:50],
+            "threshold_source": threshold_source,
+            "effective_threshold": threshold,
+            "observed_value": len(destinations),
+        }
+        if baseline_median is not None:
+            evidence["asset_baseline_value"] = round(baseline_median, 2)
         alerts.append(
             _alert(
                 timestamp=window_df["timestamp"].max(),
@@ -187,7 +255,7 @@ def detect_host_scan(df: pd.DataFrame, config: dict) -> pd.DataFrame:
                 alert_type="Host scan",
                 event_count=len(window_df),
                 window_minutes=window,
-                evidence={"unique_destinations": len(destinations), "destinations_sample": destinations[:50]},
+                evidence=evidence,
                 config=config,
                 first_seen=window_df["timestamp"].min(),
                 last_seen=window_df["timestamp"].max(),
@@ -198,31 +266,51 @@ def detect_host_scan(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return pd.DataFrame(alerts, columns=ALERT_COLUMNS) if alerts else _empty_alerts()
 
 
-def detect_large_outbound_transfer(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+def detect_large_outbound_transfer(
+    df: pd.DataFrame,
+    config: dict,
+    baseline: "BaselineStore | None" = None,
+) -> pd.DataFrame:
     """Detect unusually large outbound bytes_sent values."""
     cfg = config["large_transfer"]
     percentile = float(cfg["percentile"])
     minimum = int(cfg["minimum_bytes"])
+    bl_enabled = baseline is not None and config.get("baselining", {}).get("enabled", False)
     if df.empty:
         return _empty_alerts()
-    percentile_threshold = float(df["bytes_sent"].quantile(percentile))
-    threshold = max(percentile_threshold, minimum)
-    candidates = df[df["bytes_sent"] >= threshold].copy()
+    global_percentile_threshold = float(df["bytes_sent"].quantile(percentile))
+    global_threshold = max(global_percentile_threshold, minimum)
     alerts: list[dict[str, Any]] = []
-    for _, row in candidates.iterrows():
+    for _, row in df.iterrows():
+        src_ip = str(row["src_ip"])
+        if bl_enabled:
+            threshold, threshold_source, baseline_median = baseline.get_effective_threshold(  # type: ignore[union-attr]
+                src_ip, "bytes_sent", global_threshold
+            )
+        else:
+            threshold, threshold_source, baseline_median = global_threshold, "global_config", None
+
+        if row["bytes_sent"] < threshold:
+            continue
+        evidence: dict[str, Any] = {
+            "bytes_sent": int(row["bytes_sent"]),
+            "threshold": int(threshold),
+            "interpretation": "Unusually large outbound data transfer requiring investigation",
+            "threshold_source": threshold_source,
+            "effective_threshold": int(threshold),
+            "observed_value": int(row["bytes_sent"]),
+        }
+        if baseline_median is not None:
+            evidence["asset_baseline_value"] = round(baseline_median, 2)
         alerts.append(
             _alert(
                 timestamp=row["timestamp"],
-                src_ip=str(row["src_ip"]),
+                src_ip=src_ip,
                 dst_ip=str(row["dst_ip"]),
                 alert_type="Large outbound transfer",
                 event_count=1,
                 window_minutes=0,
-                evidence={
-                    "bytes_sent": int(row["bytes_sent"]),
-                    "threshold": int(threshold),
-                    "interpretation": "Unusually large outbound data transfer requiring investigation",
-                },
+                evidence=evidence,
                 config=config,
                 first_seen=row["timestamp"],
                 last_seen=row["timestamp"],
@@ -283,9 +371,25 @@ def detect_off_hours_activity(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return pd.DataFrame(alerts, columns=ALERT_COLUMNS) if alerts else _empty_alerts()
 
 
-def run_all_detectors(df: pd.DataFrame, config: dict, available_columns: set[str] | None = None) -> pd.DataFrame:
-    """Run every detector, combine results, remove duplicates, and assign IDs."""
+def run_all_detectors(
+    df: pd.DataFrame,
+    config: dict,
+    available_columns: set[str] | None = None,
+    baseline_store: "BaselineStore | None" = None,
+) -> pd.DataFrame:
+    """Run every detector, combine results, remove duplicates, and assign IDs.
+
+    When ``config["baselining"]["enabled"]`` is True the function computes a
+    :class:`~src.baseline.BaselineStore` from *df* (unless *baseline_store* is
+    supplied by the caller) and passes it to each baseline-aware detector.
+    """
     available = set(available_columns or df.attrs.get("available_columns", df.columns))
+    bl_enabled = config.get("baselining", {}).get("enabled", False)
+
+    if bl_enabled and baseline_store is None:
+        from src.baseline import compute_baseline  # local import avoids circular deps
+        baseline_store = compute_baseline(df, config)
+
     detector_requirements = {
         "Repeated blocked connections": {"timestamp", "src_ip", "dst_ip", "dst_port", "action"},
         "Port scan": {"timestamp", "src_ip", "dst_ip", "dst_port"},
@@ -293,6 +397,7 @@ def run_all_detectors(df: pd.DataFrame, config: dict, available_columns: set[str
         "Large outbound transfer": {"timestamp", "src_ip", "dst_ip", "dst_port", "bytes_sent"},
         "Suspicious off-hours activity": {"timestamp", "src_ip", "dst_ip", "dst_port", "action", "bytes_sent"},
     }
+    baseline_aware = {"Repeated blocked connections", "Port scan", "Host scan", "Large outbound transfer"}
     detector_functions = {
         "Repeated blocked connections": detect_repeated_blocked_connections,
         "Port scan": detect_port_scan,
@@ -301,7 +406,15 @@ def run_all_detectors(df: pd.DataFrame, config: dict, available_columns: set[str
         "Suspicious off-hours activity": detect_off_hours_activity,
     }
     skipped = [name for name, required in detector_requirements.items() if not required.issubset(available)]
-    frames = [detector_functions[name](df, config) for name in detector_requirements if name not in skipped]
+    frames = []
+    for name in detector_requirements:
+        if name in skipped:
+            continue
+        fn = detector_functions[name]
+        if name in baseline_aware and bl_enabled:
+            frames.append(fn(df, config, baseline_store))  # type: ignore[call-arg]
+        else:
+            frames.append(fn(df, config))
     alerts = pd.concat(frames, ignore_index=True) if frames else _empty_alerts()
     if alerts.empty:
         result = _empty_alerts()

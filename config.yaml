@@ -76,3 +76,13 @@ analytics:
 working_hours:
   start_hour: 5
   end_hour: 24
+
+# Per-asset / per-subnet baselining. When disabled, all detectors use the
+# global fixed thresholds above, reproducing the original behavior exactly.
+baselining:
+  enabled: false
+  group_by: src_ip          # src_ip | subnet24 (uses subnet_prefix_length)
+  subnet_prefix_length: 24  # CIDR prefix length when group_by is subnet24
+  min_history_events: 20    # minimum events before per-asset baseline is trusted
+  deviation_multiplier: 2.0 # effective_threshold = baseline_median * multiplier
+  min_threshold_floor: 5    # absolute minimum threshold (prevents collapse to near-zero)

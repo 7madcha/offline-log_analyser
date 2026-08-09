@@ -47,6 +47,15 @@ def load_config(config_path: str | Path = "config.yaml") -> dict[str, Any]:
     hours = config.setdefault("working_hours", {"start_hour": 5, "end_hour": 24})
     hours["start_hour"] = int(valid_number(hours.get("start_hour"), 5, 0, 23))
     hours["end_hour"] = int(valid_number(hours.get("end_hour"), 24, 1, 24))
+    bl = config.setdefault("baselining", {})
+    bl.setdefault("enabled", False)
+    bl.setdefault("group_by", "src_ip")
+    if bl["group_by"] not in {"src_ip", "subnet24"}:
+        bl["group_by"] = "src_ip"
+    bl["subnet_prefix_length"] = int(valid_number(bl.get("subnet_prefix_length"), 24, 1, 32))
+    bl["min_history_events"] = int(valid_number(bl.get("min_history_events"), 50, 1))
+    bl["deviation_multiplier"] = valid_number(bl.get("deviation_multiplier"), 3.0, 0.1)
+    bl["min_threshold_floor"] = int(valid_number(bl.get("min_threshold_floor"), 5, 1))
     return config
 
 

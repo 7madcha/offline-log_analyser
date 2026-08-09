@@ -21,9 +21,11 @@ from src.utils import load_config
 from src.validator import validate_columns, validate_dataset
 
 
-def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root: str = "outputs") -> dict[str, object]:
+def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root: str = "outputs", baselining_enabled: bool | None = None) -> dict[str, object]:
     """Execute the complete offline analysis pipeline."""
     config = load_config(config_path)
+    if baselining_enabled is not None:
+        config.setdefault("baselining", {})["enabled"] = baselining_enabled
     raw_df = load_logs(input_path)
     validate_dataset(raw_df)
     mapping = map_log_schema(raw_df, config)
@@ -72,6 +74,7 @@ def run_pipeline(input_path: str, config_path: str = "config.yaml", output_root:
         "highest_ai_score": float(ai_results["ai_anomaly_score"].max()) if "ai_anomaly_score" in ai_results and not ai_results.empty else 0.0,
         "most_active_source_ip": str(sources.iloc[0]["src_ip"]) if not sources.empty else "None",
         "most_frequent_destination_port": str(ports.iloc[0]["dst_port"]) if not ports.empty else "None",
+        "baselining_enabled": bool(config.get("baselining", {}).get("enabled", False)),
         "cleaning_summary": cleaning_summary,
         "mapped_columns": mapping.mapped_columns,
         "unavailable_columns": mapping.unavailable_columns,
@@ -91,9 +94,13 @@ def main() -> None:
     parser.add_argument("--input", required=True, help="Input firewall log CSV, JSON, JSONL, or NDJSON path.")
     parser.add_argument("--config", default="config.yaml", help="Configuration YAML path.")
     parser.add_argument("--output", default="outputs", help="Output root directory.")
+    bl_group = parser.add_mutually_exclusive_group()
+    bl_group.add_argument("--baseline", dest="baselining_enabled", action="store_true", default=None,
+                          help="Enable per-asset baselining (overrides config.yaml).")
+    bl_group.add_argument("--no-baseline", dest="baselining_enabled", action="store_false",
+                          help="Disable per-asset baselining (overrides config.yaml).")
     args = parser.parse_args()
-
-    result = run_pipeline(args.input, args.config, args.output)
+    result = run_pipeline(args.input, args.config, args.output, baselining_enabled=args.baselining_enabled)
     print("Analysis completed")
     print()
     print(f"Input rows: {result['input_rows']:,}")
@@ -104,6 +111,7 @@ def main() -> None:
     print(f"Highest AI anomaly score: {result['highest_ai_score']:.2f}")
     print(f"Most active source IP: {result['most_active_source_ip']}")
     print(f"Most frequently contacted destination port: {result['most_frequent_destination_port']}")
+    print(f"Per-asset baselining: {'enabled' if result.get('baselining_enabled') else 'disabled'}")
     if result["unavailable_columns"]:
         print(f"Unavailable source fields: {', '.join(result['unavailable_columns'])}")
     if result["skipped_detectors"]:

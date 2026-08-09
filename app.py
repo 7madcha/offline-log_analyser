@@ -65,9 +65,11 @@ def inject_styles() -> None:
     )
 
 
-def analyze_dataframe(raw: pd.DataFrame, config_path: str = "config.yaml") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
+def analyze_dataframe(raw: pd.DataFrame, config_path: str = "config.yaml", baselining_enabled: bool | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     """Analyze a dataframe without contacting any external service."""
     config = load_config(config_path)
+    if baselining_enabled is not None:
+        config.setdefault("baselining", {})["enabled"] = baselining_enabled
     validate_dataset(raw)
     mapping = map_log_schema(raw, config)
     validate_columns(mapping.logs, ["timestamp", "src_ip"])
@@ -81,27 +83,26 @@ def analyze_dataframe(raw: pd.DataFrame, config_path: str = "config.yaml") -> tu
     return cleaned, alerts, incidents, summary
 
 
-@st.cache_data(show_spinner=False)
-def analyze_default_file(path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
+def analyze_default_file(path: str, baselining_enabled: bool | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     """Load and analyze the default local CSV file."""
-    return analyze_dataframe(load_logs(path))
+    return analyze_dataframe(load_logs(path), baselining_enabled=baselining_enabled)
 
 
-def analyze_generated_profile(name: str, rows: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
+def analyze_generated_profile(name: str, rows: int, baselining_enabled: bool | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     """Generate fake logs locally, save them, and analyze them."""
     options = SAMPLE_PROFILES[name]
     raw = generate_firewall_logs(rows=rows, seed=options["seed"], profile=options["profile"])
     ensure_directory(DEFAULT_FILE.parent)
     raw.to_csv(DEFAULT_FILE, index=False, encoding="utf-8")
-    return analyze_dataframe(raw)
+    return analyze_dataframe(raw, baselining_enabled=baselining_enabled)
 
 
-def analyze_uploaded_file(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
+def analyze_uploaded_file(uploaded_file, baselining_enabled: bool | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, int]]:
     """Analyze an uploaded local CSV or JSON log without saving it."""
-    return analyze_dataframe(load_uploaded_logs(uploaded_file))
+    return analyze_dataframe(load_uploaded_logs(uploaded_file), baselining_enabled=baselining_enabled)
 
 
-def render_sidebar() -> tuple[str, str, int, object, bool]:
+def render_sidebar() -> tuple[str, str, int, object, bool, bool]:
     """Render simple data controls."""
     st.sidebar.title("Offline Analyzer")
     st.sidebar.caption("Local files and synthetic data only.")
@@ -133,11 +134,22 @@ def render_sidebar() -> tuple[str, str, int, object, bool]:
         mime="text/csv",
         width="stretch",
     )
+    st.sidebar.divider()
+    st.sidebar.subheader("Detection settings")
+    baselining_on = st.sidebar.toggle(
+        "Per-asset baselining",
+        value=False,
+        help=(
+            "When enabled, detection thresholds are derived from each host's own "
+            "historical behaviour rather than a single global value. High-traffic "
+            "hosts get higher thresholds; quiet hosts get lower ones."
+        ),
+    )
     st.sidebar.caption("Local only: no scanning, APIs, VPN, or company system access.")
-    return source, profile, int(rows), uploaded, run_clicked
+    return source, profile, int(rows), uploaded, run_clicked, baselining_on
 
 
-def get_analysis(source: str, profile: str, rows: int, uploaded, run_clicked: bool):
+def get_analysis(source: str, profile: str, rows: int, uploaded, run_clicked: bool, baselining_on: bool = False):
     """Run analysis from the selected dashboard source."""
     if not run_clicked:
         if "analysis" in st.session_state:
@@ -148,16 +160,16 @@ def get_analysis(source: str, profile: str, rows: int, uploaded, run_clicked: bo
         if uploaded is None:
             st.info("Upload a CSV or JSON log file, then click Run analysis.")
             return None
-        result = analyze_uploaded_file(uploaded)
+        result = analyze_uploaded_file(uploaded, baselining_enabled=baselining_on)
         label = f"Uploaded file: {uploaded.name}"
     elif source == "Generate fake logs":
-        result = analyze_generated_profile(profile, rows)
+        result = analyze_generated_profile(profile, rows, baselining_enabled=baselining_on)
         label = f"Generated fake logs: {profile} ({rows:,} rows)"
     else:
         if not DEFAULT_FILE.exists():
             st.info("No existing CSV found. Choose Generate fake logs, then click Run analysis.")
             return None
-        result = analyze_default_file(str(DEFAULT_FILE))
+        result = analyze_default_file(str(DEFAULT_FILE), baselining_enabled=baselining_on)
         label = f"Existing local file: {DEFAULT_FILE}"
     st.session_state["analysis"] = (*result, label)
     return st.session_state["analysis"]
@@ -326,6 +338,7 @@ def render_overview(
 
 def render_alerts(alerts: pd.DataFrame) -> None:
     """Render alert table."""
+    import json as _json
     search = st.text_input("Search alerts")
     visible = alerts.copy()
     if search and not visible.empty:
@@ -333,12 +346,34 @@ def render_alerts(alerts: pd.DataFrame) -> None:
     if visible.empty:
         st.info("No alerts to show.")
         return
-    columns = ["timestamp", "src_ip", "alert_type", "severity", "event_count", "score_contribution"]
+
+    # Parse evidence to expose threshold_source and effective_threshold in the table
+    def _ev(row) -> dict:
+        try:
+            return _json.loads(row) if isinstance(row, str) else {}
+        except Exception:
+            return {}
+
+    ev_parsed = visible["evidence"].apply(_ev)
+    visible["threshold_mode"] = ev_parsed.apply(lambda e: "⚡ per-asset" if e.get("threshold_source") == "per_asset_baseline" else "— global")
+    visible["eff_threshold"] = ev_parsed.apply(lambda e: e.get("effective_threshold", ""))
+    visible["observed"] = ev_parsed.apply(lambda e: e.get("observed_value", ""))
+
+    n_baseline = (visible["threshold_mode"] == "⚡ per-asset").sum()
+    if n_baseline > 0:
+        st.success(f"⚡ **Per-asset baselining active** — {n_baseline} of {len(visible)} alerts used host-specific thresholds.")
+    elif "evidence" in visible.columns:
+        st.info("Per-asset baselining is **off** — all alerts used global thresholds. Enable the toggle in the sidebar to see per-host adaptive thresholds.")
+
+    columns = ["timestamp", "src_ip", "alert_type", "severity", "threshold_mode", "eff_threshold", "observed", "event_count", "score_contribution"]
     st.dataframe(
         visible[columns],
         width="stretch",
         hide_index=True,
         column_config={
+            "threshold_mode": st.column_config.TextColumn("Threshold"),
+            "eff_threshold": st.column_config.NumberColumn("Eff. threshold", format="%g"),
+            "observed": st.column_config.NumberColumn("Observed", format="%g"),
             "event_count": st.column_config.NumberColumn("Events", format="%d"),
             "score_contribution": st.column_config.NumberColumn("Score", format="%d"),
         },
@@ -385,6 +420,7 @@ def render_ai_analytics(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.
         ai_config["contamination"] = st.slider("Expected anomaly fraction", 0.001, 0.5, float(ai_config["contamination"]), 0.001)
     sources = top_source_ips(logs, alerts, incidents, config["analytics"]["top_n"])
     ports = top_destination_ports(logs, config["analytics"]["top_n"])
+    dst_ips = top_destination_ips(logs, config["analytics"]["top_n"])
     model_config = {key: value for key, value in ai_config.items() if key != "anomaly_threshold"}
     ai_results = cached_ai_analysis(logs, model_config, config["working_hours"]) if enabled else pd.DataFrame()
     if not ai_results.empty:
@@ -437,6 +473,15 @@ def render_ai_analytics(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd.
         st.plotly_chart(chart_layout(fig), width="stretch")
         st.dataframe(ports, width="stretch", hide_index=True)
         st.download_button("Download destination-port analytics CSV", ports.to_csv(index=False).encode("utf-8"), "top_destination_ports.csv", "text/csv")
+
+    st.subheader("Most contacted destination IPs")
+    if dst_ips.empty:
+        st.warning("Destination-IP analytics are unavailable because no destination IP data is present.")
+    else:
+        fig = px.bar(dst_ips.sort_values("total_events"), x="total_events", y="dst_ip", orientation="h", title="Top destination IPs")
+        st.plotly_chart(chart_layout(fig), width="stretch")
+        st.dataframe(dst_ips, width="stretch", hide_index=True)
+        st.download_button("Download destination-IP analytics CSV", dst_ips.to_csv(index=False).encode("utf-8"), "top_destination_ips.csv", "text/csv")
 
 
 def build_timeline(related_alerts: pd.DataFrame, related_events: pd.DataFrame) -> pd.DataFrame:
@@ -499,14 +544,35 @@ def render_investigation(logs: pd.DataFrame, alerts: pd.DataFrame, incidents: pd
     columns = ["timestamp", "src_ip", "dst_ip", "dst_port", "protocol", "action", "bytes_sent", "bytes_received"]
     st.dataframe(related_events[columns], width="stretch", hide_index=True)
 
+    if not related_alerts.empty:
+        st.subheader("Alert evidence")
+        for _, alert_row in related_alerts.iterrows():
+            with st.expander(f"{alert_row['alert_type']} — {alert_row['alert_id']}"):
+                try:
+                    import json as _json
+                    ev = _json.loads(alert_row["evidence"]) if isinstance(alert_row["evidence"], str) else {}
+                except Exception:
+                    ev = {}
+                threshold_source = ev.get("threshold_source", "global_config")
+                if threshold_source == "per_asset_baseline":
+                    st.info(
+                        f"**Per-asset baseline used** — "
+                        f"asset baseline median: **{ev.get('asset_baseline_value', 'n/a')}**, "
+                        f"effective threshold: **{ev.get('effective_threshold', 'n/a')}**, "
+                        f"observed: **{ev.get('observed_value', 'n/a')}**"
+                    )
+                else:
+                    st.caption(f"Global config threshold: {ev.get('effective_threshold', 'n/a')} | Observed: {ev.get('observed_value', 'n/a')}")
+                st.json(ev)
+
 
 def main() -> None:
     st.set_page_config(page_title="Offline Log Forensic Analyzer", layout="wide")
     inject_styles()
-    source, profile, rows, uploaded, run_clicked = render_sidebar()
+    source, profile, rows, uploaded, run_clicked, baselining_on = render_sidebar()
 
     try:
-        analysis = get_analysis(source, profile, rows, uploaded, run_clicked)
+        analysis = get_analysis(source, profile, rows, uploaded, run_clicked, baselining_on)
     except Exception as exc:
         st.error(str(exc))
         return
