@@ -98,22 +98,32 @@ def test_build_visual_pdf_report_mocked():
 
 def test_html_to_pdf_bytes_mocked():
     from unittest.mock import MagicMock, patch
-    from src.reporting import _html_to_pdf_bytes
+    import src.reporting as reporting
 
-    with patch("playwright.sync_api.sync_playwright") as mock_sync:
-        mock_playwright = MagicMock()
-        mock_browser = MagicMock()
-        mock_page = MagicMock()
+    # The shared-browser cache is module-level state (kept alive across calls
+    # on purpose, to avoid relaunching Chromium per PDF export) — reset it
+    # around this test so it doesn't leak a mock browser into other tests.
+    reporting._PLAYWRIGHT_CTX = None
+    reporting._PLAYWRIGHT_BROWSER = None
+    try:
+        with patch("playwright.sync_api.sync_playwright") as mock_sync:
+            mock_playwright = MagicMock()
+            mock_browser = MagicMock()
+            mock_page = MagicMock()
 
-        mock_sync.return_value.__enter__.return_value = mock_playwright
-        mock_playwright.chromium.launch.return_value = mock_browser
-        mock_browser.new_page.return_value = mock_page
-        mock_page.pdf.return_value = b"%PDF-mock-bytes"
+            mock_sync.return_value.start.return_value = mock_playwright
+            mock_playwright.chromium.launch.return_value = mock_browser
+            mock_browser.new_page.return_value = mock_page
+            mock_browser.is_connected.return_value = True
+            mock_page.pdf.return_value = b"%PDF-mock-bytes"
 
-        pdf = _html_to_pdf_bytes("<html></html>")
-        assert pdf == b"%PDF-mock-bytes"
-        mock_page.set_content.assert_called_once_with("<html></html>", wait_until="networkidle")
-        mock_page.pdf.assert_called_once()
+            pdf = reporting._html_to_pdf_bytes("<html></html>")
+            assert pdf == b"%PDF-mock-bytes"
+            mock_page.set_content.assert_called_once_with("<html></html>", wait_until="networkidle")
+            mock_page.pdf.assert_called_once()
+    finally:
+        reporting._PLAYWRIGHT_BROWSER = None
+        reporting._PLAYWRIGHT_CTX = None
 
 
 def test_build_visual_pdf_report_real():
@@ -126,3 +136,4 @@ def test_build_visual_pdf_report_real():
         assert pdf_bytes.startswith(b"%PDF-")
     except Exception as exc:
         assert "Playwright" in str(exc) or "playwright" in str(exc)
+

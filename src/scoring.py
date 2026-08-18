@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 ALERT_SCORE_KEYS = {
     "Repeated blocked connections": "brute_force",
     "Port scan": "port_scan",
@@ -38,6 +39,8 @@ def calculate_incident_score(alert_types: list[str] | set[str], config: dict) ->
     final_score = min(score, 100)
     breakdown.append(f"Final score: {final_score}")
     return final_score, breakdown
+
+
 
 
 def score_to_severity(score: int, config: dict) -> str:

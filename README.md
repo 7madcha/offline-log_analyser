@@ -1,6 +1,6 @@
 # Offline Log Forensic Analyzer
 
-Offline Log Forensic Analyzer is a local, offline Python project for analyzing static firewall logs stored in CSV files. It generates synthetic firewall events, validates and cleans the data, detects suspicious behaviors, correlates alerts into incidents, calculates explainable risk scores, and displays results in a simple Streamlit dashboard.
+Offline Log Forensic Analyzer is a local, offline Python project for analyzing static firewall logs stored in CSV files. It generates synthetic firewall events, validates and cleans the data, detects suspicious behaviors, correlates alerts into incidents, calculates explainable risk scores, and displays results in an interactive Plotly Dash dashboard.
 
 The project is designed as a readable 3-4 week internship project. It does not require firewall access, VPN access, company infrastructure, credentials, real logs, external APIs, Docker, or a database.
 
@@ -21,7 +21,7 @@ Additional aliases can be configured under `schema_mapping.aliases` in `config.y
 - Export cleaned logs, alerts, and incidents as CSV files.
 - Export a local PDF incident and risk summary report.
 - Download a CSV schema template from the dashboard.
-- Explore results in a simple Streamlit and Plotly dashboard.
+- Explore results in an interactive Plotly Dash dashboard.
 
 
 ## Project File Guide
@@ -113,12 +113,12 @@ Generated files:
 
 ## Dashboard Screenshots
 
-No dashboard image file is committed by default. To keep the repository code/data focused, run `streamlit run app.py` and capture screenshots manually when needed for reports or presentations.
+No dashboard image file is committed by default. To keep the repository code/data focused, run `run.bat` (or `python app.py`) and capture screenshots manually when needed for reports or presentations.
 
 ## Dashboard Execution
 
 ```bash
-streamlit run app.py
+run.bat
 ```
 
 The dashboard includes:
@@ -152,8 +152,8 @@ offline-log-analyzer/
 |-- README.md
 |-- config.yaml
 |-- .gitignore
-|-- .streamlit/
-|   `-- config.toml
+|-- assets/
+|   `-- theme.css
 |-- data/
 |   |-- raw/
 |   |-- processed/
@@ -273,7 +273,7 @@ Install and run:
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe main.py --input data\synthetic\firewall_logs.csv
-.venv\Scripts\streamlit.exe run app.py
+.venv\Scripts\python.exe app.py
 ```
 
 The CLI saves AI findings to `outputs/ai/anomalies.csv` and traffic summaries to `outputs/analytics/top_source_ips.csv` and `outputs/analytics/top_destination_ports.csv`. Change window size, estimator count, contamination, deterministic seed, and score threshold under `ai_detection` in `config.yaml`; change the ranking size under `analytics.top_n`.

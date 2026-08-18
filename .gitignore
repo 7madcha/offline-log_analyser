@@ -4,7 +4,6 @@
 __pycache__/
 .pytest_cache/
 *.pyc
-.streamlit/secrets.toml
 outputs/*.csv
 outputs/**/*.csv
 outputs/alerts/*.csv
@@ -12,6 +11,7 @@ outputs/incidents/*.csv
 outputs/reports/*.csv
 data/processed/*.csv
 outputs/reports/*.pdf
+outputs/**/*.html
 
 # IDE config — personal, not for version control
 .vscode/

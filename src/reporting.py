@@ -362,19 +362,37 @@ def export_html_report(
     return output
 
 
-def _fig_to_img_tag(fig, width: int = 740, height: int = 300) -> str:
-    """Convert a Plotly figure to an inline base64 PNG <img> tag.
+def _render_charts_batch(figs: list, sizes: list[tuple[int, int]]) -> list[str]:
+    """Render several Plotly figures to base64 PNG <img> tags in one Kaleido pass.
 
-    Returns an empty string silently if kaleido is not installed.
+    Rendering N figures one at a time (plotly.io.to_image, called N times) pays
+    Kaleido's Chromium start-up cost N times over — the dominant cost of the PDF
+    report. ``plotly.io.write_images`` renders a whole batch in a single browser
+    session instead, which is several times faster for the multi-chart report.
+    Falls back to an empty string per chart (same as before) if kaleido isn't
+    installed or rendering fails, so a broken/missing kaleido silently drops the
+    chart images rather than failing the whole report.
     """
+    if not figs:
+        return []
     try:
         import base64
+        import tempfile
         import plotly.io as pio
-        png_bytes = pio.to_image(fig, format="png", width=width, height=height, scale=2)
-        b64 = base64.b64encode(png_bytes).decode("ascii")
-        return f'<img src="data:image/png;base64,{b64}" style="width:100%;display:block;" alt="chart">'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = [str(Path(tmpdir) / f"chart_{i}.png") for i in range(len(figs))]
+            widths = [w for w, _h in sizes]
+            heights = [h for _w, h in sizes]
+            pio.write_images(fig=figs, file=paths, format="png", width=widths, height=heights, scale=2)
+            tags = []
+            for path in paths:
+                png_bytes = Path(path).read_bytes()
+                b64 = base64.b64encode(png_bytes).decode("ascii")
+                tags.append(f'<img src="data:image/png;base64,{b64}" style="width:100%;display:block;" alt="chart">')
+            return tags
     except Exception:
-        return ""
+        return ["" for _ in figs]
 
 
 def _build_chart_html(
@@ -385,9 +403,10 @@ def _build_chart_html(
 ) -> str:
     """Build the charts HTML block to embed in the PDF report.
 
-    Each chart is rendered as a static PNG via kaleido.  If kaleido is
-    not installed every _fig_to_img_tag call returns '' and the block
-    ends up empty so the caller skips it entirely.
+    All charts are collected first and rendered together in a single batched
+    Kaleido call (see _render_charts_batch), then assembled into HTML. If
+    kaleido is not installed or rendering fails, every image comes back empty
+    and each chart's wrapper div is skipped, same as the previous behavior.
     """
     try:
         import plotly.express as px
@@ -404,10 +423,15 @@ def _build_chart_html(
         margin=dict(l=50, r=20, t=40, b=50),
     )
 
-    parts: list[str] = []
+    # Each queued job is (title, width, height, wrap_in_pair: bool). Figures
+    # and sizes are collected up front and rendered together at the end.
+    figs: list = []
+    sizes: list[tuple[int, int]] = []
+    jobs: list[tuple[str, bool]] = []  # (title, is_pair_item)
 
     # ── 1. Events over time ───────────────────────────────────────────────────
-    if not logs.empty and "timestamp" in logs.columns:
+    has_events_chart = not logs.empty and "timestamp" in logs.columns
+    if has_events_chart:
         _time_range = logs["timestamp"].max() - logs["timestamp"].min()
         if _time_range <= pd.Timedelta(minutes=10):
             _freq, _label = "s", "second"
@@ -420,18 +444,13 @@ def _build_chart_html(
         binned = logs.set_index("timestamp").resample(_freq).size().reset_index(name="events")
         fig = px.line(binned, x="timestamp", y="events", title=f"Events over time (per {_label})")
         fig.update_layout(**_LAYOUT)
-        img = _fig_to_img_tag(fig, width=740, height=280)
-        if img:
-            parts.append(
-                f'<div style="margin-bottom:16px">'
-                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Events over time</p>'
-                f'{img}</div>'
-            )
+        figs.append(fig)
+        sizes.append((740, 280))
+        jobs.append(("Events over time", False))
 
     # ── 2. Allowed vs Blocked + Incidents by severity (side-by-side) ──────────
-    pair: list[str] = []
-
-    if not logs.empty and "action" in logs.columns:
+    has_action_chart = not logs.empty and "action" in logs.columns
+    if has_action_chart:
         blocked = int((logs["action"] == "BLOCK").sum())
         allowed = int((logs["action"] == "ALLOW").sum())
         action_df = pd.DataFrame({"action": ["ALLOW", "BLOCK"], "count": [allowed, blocked]})
@@ -440,15 +459,12 @@ def _build_chart_html(
             color="action", color_discrete_map={"ALLOW": "#0f766e", "BLOCK": "#dc2626"},
         )
         fig.update_layout(**_LAYOUT, showlegend=False)
-        img = _fig_to_img_tag(fig, width=360, height=260)
-        if img:
-            pair.append(
-                f'<div style="flex:1;min-width:0">'
-                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Allowed vs Blocked</p>'
-                f'{img}</div>'
-            )
+        figs.append(fig)
+        sizes.append((360, 260))
+        jobs.append(("Allowed vs Blocked", True))
 
-    if not incidents.empty and "severity" in incidents.columns:
+    has_severity_chart = not incidents.empty and "severity" in incidents.columns
+    if has_severity_chart:
         sev = incidents["severity"].value_counts().reindex(_SEVERITY_ORDER, fill_value=0).reset_index()
         sev.columns = ["severity", "count"]
         fig = px.bar(
@@ -456,24 +472,18 @@ def _build_chart_html(
             color="severity", color_discrete_map=_SEVERITY_COLORS,
         )
         fig.update_layout(**_LAYOUT, showlegend=False)
-        img = _fig_to_img_tag(fig, width=360, height=260)
-        if img:
-            pair.append(
-                f'<div style="flex:1;min-width:0">'
-                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Incidents by Severity</p>'
-                f'{img}</div>'
-            )
-
-    if pair:
-        parts.append(f'<div style="display:flex;gap:16px;margin-bottom:16px">{"  ".join(pair)}</div>')
+        figs.append(fig)
+        sizes.append((360, 260))
+        jobs.append(("Incidents by Severity", True))
 
     # ── 3. Top source IPs ─────────────────────────────────────────────────────
-    if (
+    has_sources_chart = (
         top_sources is not None
         and not top_sources.empty
         and "src_ip" in top_sources.columns
         and "total_events" in top_sources.columns
-    ):
+    )
+    if has_sources_chart:
         fig = px.bar(
             top_sources.sort_values("total_events"),
             x="total_events", y="src_ip",
@@ -481,21 +491,18 @@ def _build_chart_html(
         )
         h = max(220, len(top_sources) * 26 + 70)
         fig.update_layout(**_LAYOUT, height=h)
-        img = _fig_to_img_tag(fig, width=740, height=h)
-        if img:
-            parts.append(
-                f'<div style="margin-bottom:16px">'
-                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Top Active Source IPs</p>'
-                f'{img}</div>'
-            )
+        figs.append(fig)
+        sizes.append((740, h))
+        jobs.append(("Top Active Source IPs", False))
 
     # ── 4. Top destination ports ──────────────────────────────────────────────
-    if (
+    has_ports_chart = (
         top_ports is not None
         and not top_ports.empty
         and "dst_port" in top_ports.columns
         and "total_events" in top_ports.columns
-    ):
+    )
+    if has_ports_chart:
         port_chart = top_ports.copy()
         port_chart["port_label"] = (
             port_chart["dst_port"].astype(str)
@@ -508,13 +515,29 @@ def _build_chart_html(
         )
         h = max(220, len(port_chart) * 26 + 70)
         fig.update_layout(**_LAYOUT, height=h)
-        img = _fig_to_img_tag(fig, width=740, height=h)
-        if img:
-            parts.append(
-                f'<div style="margin-bottom:16px">'
-                f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">Top Destination Ports</p>'
-                f'{img}</div>'
-            )
+        figs.append(fig)
+        sizes.append((740, h))
+        jobs.append(("Top Destination Ports", False))
+
+    # One batched render for every chart above, instead of one Kaleido call each.
+    images = _render_charts_batch(figs, sizes)
+
+    parts: list[str] = []
+    pair: list[str] = []
+    pair_insert_at: int | None = None
+    for (title, is_pair_item), img in zip(jobs, images):
+        if is_pair_item and pair_insert_at is None:
+            pair_insert_at = len(parts)  # preserve original ordering: events chart, then the pair, then the rest
+        if not img:
+            continue
+        block = f'<p style="font-weight:600;margin:0 0 6px;font-size:13px">{title}</p>{img}'
+        if is_pair_item:
+            pair.append(f'<div style="flex:1;min-width:0">{block}</div>')
+        else:
+            parts.append(f'<div style="margin-bottom:16px">{block}</div>')
+
+    if pair:
+        parts.insert(pair_insert_at or 0, f'<div style="display:flex;gap:16px;margin-bottom:16px">{"  ".join(pair)}</div>')
 
     return "".join(parts)
 
@@ -568,26 +591,74 @@ def _format_cell(value: object) -> str:
     return str(value)
 
 
+_PLAYWRIGHT_CTX = None
+_PLAYWRIGHT_BROWSER = None
+
+
+def _get_shared_browser():
+    """Return a long-lived Chromium instance, launching it only once.
+
+    Launching Chromium (~1-1.5s) was previously paid on every single PDF
+    export. In a long-running process (the Dash app, or repeated calls in
+    the same script) it's launched once and reused, which is most of the
+    per-report speedup for repeat exports. A fresh browser is still launched
+    per call in a short-lived process (e.g. one CLI run), so nothing gets
+    slower for that case.
+    """
+    global _PLAYWRIGHT_CTX, _PLAYWRIGHT_BROWSER
+    if _PLAYWRIGHT_BROWSER is not None:
+        try:
+            if _PLAYWRIGHT_BROWSER.is_connected():
+                return _PLAYWRIGHT_BROWSER
+        except Exception:
+            pass
+        _PLAYWRIGHT_BROWSER = None
+
+    from playwright.sync_api import sync_playwright
+
+    if _PLAYWRIGHT_CTX is None:
+        _PLAYWRIGHT_CTX = sync_playwright().start()
+        import atexit
+
+        atexit.register(_close_shared_browser)
+    _PLAYWRIGHT_BROWSER = _PLAYWRIGHT_CTX.chromium.launch()
+    return _PLAYWRIGHT_BROWSER
+
+
+def _close_shared_browser() -> None:
+    global _PLAYWRIGHT_CTX, _PLAYWRIGHT_BROWSER
+    try:
+        if _PLAYWRIGHT_BROWSER is not None:
+            _PLAYWRIGHT_BROWSER.close()
+    except Exception:
+        pass
+    try:
+        if _PLAYWRIGHT_CTX is not None:
+            _PLAYWRIGHT_CTX.stop()
+    except Exception:
+        pass
+    _PLAYWRIGHT_BROWSER = None
+    _PLAYWRIGHT_CTX = None
+
+
 def _html_to_pdf_bytes(html: str) -> bytes:
     try:
         from playwright.sync_api import Error as PlaywrightError
-        from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise RuntimeError(_playwright_install_message()) from exc
 
     try:
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
-            try:
-                page = browser.new_page(viewport={"width": 1180, "height": 1600})
-                page.set_content(html, wait_until="networkidle")
-                return page.pdf(
-                    format="A4",
-                    print_background=True,
-                    margin={"top": "14mm", "right": "12mm", "bottom": "14mm", "left": "12mm"},
-                )
-            finally:
-                browser.close()
+        browser = _get_shared_browser()
+        page = browser.new_page(viewport={"width": 1180, "height": 1600})
+        try:
+            page.set_content(html, wait_until="networkidle")
+            return page.pdf(
+                format="A4",
+                print_background=True,
+                margin={"top": "14mm", "right": "12mm", "bottom": "14mm", "left": "12mm"},
+            )
+        finally:
+            page.close()
     except PlaywrightError as exc:
         raise RuntimeError(_playwright_install_message()) from exc
 

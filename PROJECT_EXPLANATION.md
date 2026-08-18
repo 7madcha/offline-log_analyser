@@ -5,13 +5,13 @@ This project is fully local. It analyzes CSV files that are already on the machi
 ## Root files
 
 ### `.gitignore`
-Keeps local-only files out of Git, including the virtual environment, Python caches, generated CSV outputs, generated PDF reports, Streamlit secrets, and Codex-local folders.
+Keeps local-only files out of Git, including the virtual environment, Python caches, generated CSV outputs, generated PDF reports, and Codex-local folders.
 
 ### `README.md`
 Explains the project purpose, setup commands, synthetic data generation, CLI usage, dashboard usage, tests, project structure, detection rules, risk scoring, limitations, and ethical boundaries.
 
 ### `requirements.txt`
-Lists the Python packages needed to run the project: pandas, numpy, streamlit, plotly, pyyaml, and pytest.
+Lists the Python packages needed to run the project: pandas, numpy, dash, plotly, pyyaml, scikit-learn, reportlab, pytest, and playwright.
 
 ### `config.yaml`
 Stores all required CSV columns and detection thresholds. The detector code reads thresholds from this file instead of hardcoding values.
@@ -20,12 +20,12 @@ Stores all required CSV columns and detection thresholds. The detector code read
 Runs the command-line pipeline. It loads config, loads a CSV, validates it, cleans it, runs detectors, correlates incidents, exports CSV files, creates a PDF report, and prints a summary.
 
 ### `app.py`
-Runs the Streamlit dashboard. It provides the local data selector, one-click Run analysis button, fake log generation, CSV upload, existing-file analysis, filters, charts, alert and incident tables, investigation timeline, CSV template download, and PDF report download.
+Runs the Plotly Dash interactive dashboard. It provides the local data selector, one-click Run analysis button, fake log generation, CSV upload, existing-file analysis, filters, charts, alert and incident tables, investigation timeline, CSV template download, and PDF report download.
 
-## Streamlit config
+## Assets folder
 
-### `.streamlit/config.toml`
-Configures Streamlit for this project. It disables browser usage statistics collection.
+### `assets/theme.css`
+Contains local CSS styling and custom design rules for the Plotly Dash interface.
 
 ## Data files and folders
 
@@ -140,4 +140,4 @@ Rule-based detectors recognize known patterns such as scans or repeated blocked 
 
 The source-IP ranking counts events per source, then calculates allow/block totals, blocked ratio, unique targets and ports, byte totals, alert count, and maximum incident risk. The destination-port ranking counts contacts per port and adds source/destination diversity, actions, bytes, and a common-service name. Dashboard filters are applied before these summaries are calculated.
 
-Run the CLI with `.venv\Scripts\python.exe main.py --input data\synthetic\firewall_logs.csv` or start the dashboard with `.venv\Scripts\streamlit.exe run app.py`. New exports are written to `outputs/ai/anomalies.csv`, `outputs/analytics/top_source_ips.csv`, and `outputs/analytics/top_destination_ports.csv`. Settings live under `ai_detection`, `analytics`, and `working_hours` in `config.yaml`; invalid values fall back to safe defaults.
+Run the CLI with `.venv\Scripts\python.exe main.py --input data\synthetic\firewall_logs.csv` or start the dashboard with `run.bat` (or `.venv\Scripts\python.exe app.py`). New exports are written to `outputs/ai/anomalies.csv`, `outputs/analytics/top_source_ips.csv`, and `outputs/analytics/top_destination_ports.csv`. Settings live under `ai_detection`, `analytics`, and `working_hours` in `config.yaml`; invalid values fall back to safe defaults.
