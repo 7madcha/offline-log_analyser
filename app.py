@@ -19,10 +19,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dash_table, dcc, html, no_update
 
+from src.analysis_settings import AnalysisMode, AnalysisSettings, SettingsValidationError, effective_analysis_mode
 from src.ai_detector import detect_ai_anomalies
 from src.ai_features import build_behavioral_features
 from src.cleaner import clean_logs
 from src.correlator import correlate_alerts
+from src.custom_analysis import analyze_dataframe_with_custom_settings
 from src.detectors import run_all_detectors
 from src.generate_logs import generate_firewall_logs
 from src.loader import load_logs, load_uploaded_logs
@@ -54,6 +56,8 @@ def _empty_analysis_state() -> dict[str, object]:
         "summary": {},
         "label": "",
         "baselining_enabled": False,
+        "analysis_mode": AnalysisMode.STANDARD.value,
+        "custom_settings": None,
         "filtered_logs": pd.DataFrame(),
         "filtered_alerts": pd.DataFrame(),
         "filtered_incidents": pd.DataFrame(),
@@ -306,6 +310,7 @@ app = Dash(__name__, suppress_callback_exceptions=True, title="Offline Log Foren
 server = app.server
 
 _base_config = load_config("config.yaml")
+_default_custom_settings = AnalysisSettings.from_config(_base_config)
 
 
 def build_sidebar() -> html.Div:
@@ -420,6 +425,49 @@ def build_sidebar() -> html.Div:
                         "Adapts thresholds to each host's own history instead of one global value.",
                         className="small-muted",
                         style={"margin": "0.35rem 0 0 0"},
+                    ),
+                    html.Hr(className="side-divider"),
+                    html.Div(
+                        dcc.Checklist(
+                            id="custom-settings-toggle",
+                            options=[{"label": " Use custom analysis settings", "value": "on"}],
+                            value=[],
+                            labelStyle={"display": "flex", "alignItems": "center", "gap": "0.5rem"},
+                        ),
+                        className="toggle-group",
+                    ),
+                    html.P(
+                        "Custom mode takes precedence over per-asset baselining for this analysis.",
+                        className="small-muted",
+                        style={"margin": "0.35rem 0 0 0"},
+                    ),
+                    html.Div(
+                        [
+                            html.Label("Blocked attempts", className="control-label"),
+                            dcc.Input(id="custom-brute-attempts", type="number", min=1, step=1, value=_default_custom_settings.brute_force_blocked_attempts, className="dash-input"),
+                            html.Label("Blocked-attempt window (minutes)", className="control-label"),
+                            dcc.Input(id="custom-brute-window", type="number", min=1, step=1, value=_default_custom_settings.brute_force_window_minutes, className="dash-input"),
+                            html.Label("Monitored destination ports", className="control-label"),
+                            dcc.Input(id="custom-brute-ports", type="text", value=", ".join(map(str, _default_custom_settings.brute_force_destination_ports)), placeholder="22, 23, 3389", className="dash-input"),
+                            html.Label("Port-scan unique ports", className="control-label"),
+                            dcc.Input(id="custom-port-threshold", type="number", min=1, step=1, value=_default_custom_settings.port_scan_unique_ports, className="dash-input"),
+                            html.Label("Port-scan window (minutes)", className="control-label"),
+                            dcc.Input(id="custom-port-window", type="number", min=1, step=1, value=_default_custom_settings.port_scan_window_minutes, className="dash-input"),
+                            html.Label("Host-scan unique destinations", className="control-label"),
+                            dcc.Input(id="custom-host-threshold", type="number", min=1, step=1, value=_default_custom_settings.host_scan_unique_destinations, className="dash-input"),
+                            html.Label("Host-scan window (minutes)", className="control-label"),
+                            dcc.Input(id="custom-host-window", type="number", min=1, step=1, value=_default_custom_settings.host_scan_window_minutes, className="dash-input"),
+                            html.Label("Large-transfer percentile", className="control-label"),
+                            dcc.Input(id="custom-transfer-percentile", type="number", min=0.001, max=1, step=0.001, value=float(_default_custom_settings.large_transfer_percentile), className="dash-input"),
+                            html.Label("Minimum outbound bytes", className="control-label"),
+                            dcc.Input(id="custom-transfer-bytes", type="number", min=1, step=1, value=_default_custom_settings.large_transfer_minimum_bytes, className="dash-input"),
+                            html.Label("Off-hours start (0-23)", className="control-label"),
+                            dcc.Input(id="custom-offhours-start", type="number", min=0, max=23, step=1, value=_default_custom_settings.off_hours_start_hour, className="dash-input"),
+                            html.Label("Off-hours end (0-24)", className="control-label"),
+                            dcc.Input(id="custom-offhours-end", type="number", min=0, max=24, step=1, value=_default_custom_settings.off_hours_end_hour, className="dash-input"),
+                        ],
+                        id="custom-settings-controls",
+                        style={"display": "none", "marginTop": "0.7rem"},
                     ),
                 ],
                 className="sidebar-card",
@@ -613,6 +661,55 @@ def toggle_comparison_controls(comparison_value):
     return {"display": "block", "marginTop": "0.7rem"} if "on" in (comparison_value or []) else {"display": "none", "marginTop": "0.7rem"}
 
 
+@app.callback(Output("custom-settings-controls", "style"), Input("custom-settings-toggle", "value"))
+def toggle_custom_settings_controls(custom_value):
+    return {"display": "block", "marginTop": "0.7rem"} if "on" in (custom_value or []) else {"display": "none", "marginTop": "0.7rem"}
+
+
+def _integer_custom_control(name: str, value) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not float(value).is_integer():
+        raise SettingsValidationError(f"{name} must be a whole number.")
+    return int(value)
+
+
+def custom_settings_from_dashboard(
+    brute_attempts,
+    brute_window,
+    brute_ports,
+    port_threshold,
+    port_window,
+    host_threshold,
+    host_window,
+    transfer_percentile,
+    transfer_bytes,
+    offhours_start,
+    offhours_end,
+) -> AnalysisSettings:
+    """Validate Dash control values and return one immutable settings object."""
+    if not isinstance(brute_ports, str) or not brute_ports.strip():
+        raise SettingsValidationError("Monitored destination ports must be a comma-separated list.")
+    try:
+        destination_ports = tuple(int(value.strip()) for value in brute_ports.split(",") if value.strip())
+    except ValueError as exc:
+        raise SettingsValidationError("Monitored destination ports must contain only whole numbers separated by commas.") from exc
+    if isinstance(transfer_percentile, bool) or not isinstance(transfer_percentile, (int, float)):
+        raise SettingsValidationError("Large-transfer percentile must be numeric.")
+
+    return AnalysisSettings(
+        brute_force_blocked_attempts=_integer_custom_control("Blocked attempts", brute_attempts),
+        brute_force_window_minutes=_integer_custom_control("Blocked-attempt window", brute_window),
+        brute_force_destination_ports=destination_ports,
+        port_scan_unique_ports=_integer_custom_control("Port-scan unique ports", port_threshold),
+        port_scan_window_minutes=_integer_custom_control("Port-scan window", port_window),
+        host_scan_unique_destinations=_integer_custom_control("Host-scan unique destinations", host_threshold),
+        host_scan_window_minutes=_integer_custom_control("Host-scan window", host_window),
+        large_transfer_percentile=float(transfer_percentile),
+        large_transfer_minimum_bytes=_integer_custom_control("Minimum outbound bytes", transfer_bytes),
+        off_hours_start_hour=_integer_custom_control("Off-hours start", offhours_start),
+        off_hours_end_hour=_integer_custom_control("Off-hours end", offhours_end),
+    )
+
+
 @app.callback(Output("comparison-upload-filename", "children"), Input("comparison-upload-data", "filename"))
 def show_comparison_upload_filename(filename):
     return f"Selected File B: {filename}" if filename else ""
@@ -648,6 +745,18 @@ def download_csv_template(_n):
     State("comparison-upload-data", "filename"),
     State("baseline-toggle", "value"),
     State("store-data-version", "data"),
+    State("custom-settings-toggle", "value"),
+    State("custom-brute-attempts", "value"),
+    State("custom-brute-window", "value"),
+    State("custom-brute-ports", "value"),
+    State("custom-port-threshold", "value"),
+    State("custom-port-window", "value"),
+    State("custom-host-threshold", "value"),
+    State("custom-host-window", "value"),
+    State("custom-transfer-percentile", "value"),
+    State("custom-transfer-bytes", "value"),
+    State("custom-offhours-start", "value"),
+    State("custom-offhours-end", "value"),
     prevent_initial_call=True,
 )
 def run_analysis(
@@ -662,12 +771,61 @@ def run_analysis(
     comparison_filename,
     baseline_value,
     version,
+    custom_value=None,
+    custom_brute_attempts=None,
+    custom_brute_window=None,
+    custom_brute_ports=None,
+    custom_port_threshold=None,
+    custom_port_window=None,
+    custom_host_threshold=None,
+    custom_host_window=None,
+    custom_transfer_percentile=None,
+    custom_transfer_bytes=None,
+    custom_offhours_start=None,
+    custom_offhours_end=None,
 ):
     baselining_on = "on" in (baseline_value or [])
     comparison_on = "on" in (comparison_value or [])
+    custom_on = "on" in (custom_value or [])
     comparison_result = None
+    active_custom_settings = None
     try:
-        if comparison_on:
+        if custom_on and comparison_on:
+            raise ValueError("Custom settings currently support single-file analysis only. Disable comparison mode and run again.")
+
+        if custom_on:
+            active_custom_settings = custom_settings_from_dashboard(
+                custom_brute_attempts,
+                custom_brute_window,
+                custom_brute_ports,
+                custom_port_threshold,
+                custom_port_window,
+                custom_host_threshold,
+                custom_host_window,
+                custom_transfer_percentile,
+                custom_transfer_bytes,
+                custom_offhours_start,
+                custom_offhours_end,
+            )
+            if source == "upload":
+                if not upload_contents or not upload_filename:
+                    return no_update, callout("warn", "Upload a CSV or JSON log file, then click Run analysis."), no_update, no_update, no_update, no_update, no_update, no_update
+                raw = load_uploaded_logs(_decode_upload(upload_contents, upload_filename))
+                label = f"Custom analysis: {upload_filename}"
+            elif source == "generate":
+                row_count = int(rows or SAMPLE_PROFILES[profile]["rows"])
+                options = SAMPLE_PROFILES[profile]
+                raw = generate_firewall_logs(rows=row_count, seed=options["seed"], profile=options["profile"])
+                ensure_directory(DEFAULT_FILE.parent)
+                raw.to_csv(DEFAULT_FILE, index=False, encoding="utf-8")
+                label = f"Custom analysis: generated {profile} ({row_count:,} rows)"
+            else:
+                if not DEFAULT_FILE.exists():
+                    return no_update, callout("warn", "No existing CSV found. Choose Generate fake logs, then click Run analysis."), no_update, no_update, no_update, no_update, no_update, no_update
+                raw = load_logs(DEFAULT_FILE)
+                label = f"Custom analysis: {DEFAULT_FILE}"
+            logs, alerts, incidents, summary = analyze_dataframe_with_custom_settings(raw, active_custom_settings)
+        elif comparison_on:
             if not comparison_contents or not comparison_filename:
                 return no_update, callout("warn", "Upload the second comparison file (File B), then click Run analysis."), no_update, no_update, no_update, no_update, no_update, no_update
 
@@ -726,7 +884,9 @@ def run_analysis(
     _STATE["incidents"] = incidents
     _STATE["summary"] = summary
     _STATE["label"] = label
-    _STATE["baselining_enabled"] = baselining_on
+    _STATE["analysis_mode"] = effective_analysis_mode(custom_settings_enabled=custom_on, baseline_enabled=baselining_on).value
+    _STATE["baselining_enabled"] = baselining_on and not custom_on
+    _STATE["custom_settings"] = active_custom_settings.to_dict() if active_custom_settings else None
     _STATE["ai_fit_cache"] = {}
     _STATE["comparison_result"] = comparison_result
 
@@ -774,7 +934,13 @@ def refresh_filters(_data_version, start_date, end_date, src_filter, severity_fi
     _STATE["top_ports"] = top_destination_ports(f_logs, top_n)
     _STATE["top_dst_ips"] = top_destination_ips(f_logs, top_n)
 
-    status = "⚡ Per-asset baselining ON" if _STATE["baselining_enabled"] else "Global thresholds"
+    mode = _STATE.get("analysis_mode", AnalysisMode.STANDARD.value)
+    if mode == AnalysisMode.CUSTOM.value:
+        status = "Custom thresholds"
+    elif _STATE["baselining_enabled"]:
+        status = "⚡ Per-asset baselining ON"
+    else:
+        status = "Global thresholds"
     return int(filter_version or 0) + 1, render_header(_STATE["label"], status, show_download=True)
 
 
@@ -977,16 +1143,22 @@ def render_alerts(_version, search):
 
     ev_parsed = visible["evidence"].apply(_ev)
     visible = visible.copy()
-    visible["threshold_mode"] = ev_parsed.apply(lambda e: "⚡ per-asset" if e.get("threshold_source") == "per_asset_baseline" else "— global")
+    visible["threshold_mode"] = ev_parsed.apply(
+        lambda evidence: "Custom" if evidence.get("threshold_source") == "custom_settings"
+        else "⚡ per-asset" if evidence.get("threshold_source") == "per_asset_baseline"
+        else "— global"
+    )
     visible["eff_threshold"] = ev_parsed.apply(lambda e: e.get("effective_threshold", ""))
     visible["observed"] = ev_parsed.apply(lambda e: e.get("observed_value", ""))
 
     n_baseline = int((visible["threshold_mode"] == "⚡ per-asset").sum())
-    banner = (
-        callout("success", f"⚡ Per-asset baselining active — {n_baseline} of {len(visible)} alerts used host-specific thresholds.")
-        if n_baseline > 0
-        else callout("info", "Per-asset baselining is off — all alerts used global thresholds.")
-    )
+    n_custom = int((visible["threshold_mode"] == "Custom").sum())
+    if n_custom > 0:
+        banner = callout("success", f"Custom analysis active — {n_custom} of {len(visible)} alerts used the dashboard thresholds.")
+    elif n_baseline > 0:
+        banner = callout("success", f"⚡ Per-asset baselining active — {n_baseline} of {len(visible)} alerts used host-specific thresholds.")
+    else:
+        banner = callout("info", "Per-asset baselining is off — all alerts used global thresholds.")
 
     columns = ["timestamp", "src_ip", "alert_type", "severity", "threshold_mode", "eff_threshold", "observed", "event_count", "score_contribution"]
     table = data_table(visible, columns, id="alerts-table")
@@ -1082,11 +1254,12 @@ def render_investigation(incident_id, _version):
         except Exception:
             ev = {}
         threshold_source = ev.get("threshold_source", "global_config")
-        note = (
-            callout("info", f"Per-asset baseline used — asset median: {ev.get('asset_baseline_value', 'n/a')}, effective threshold: {ev.get('effective_threshold', 'n/a')}, observed: {ev.get('observed_value', 'n/a')}")
-            if threshold_source == "per_asset_baseline"
-            else html.P(f"Global config threshold: {ev.get('effective_threshold', 'n/a')} | Observed: {ev.get('observed_value', 'n/a')}", className="small-muted")
-        )
+        if threshold_source == "per_asset_baseline":
+            note = callout("info", f"Per-asset baseline used — asset median: {ev.get('asset_baseline_value', 'n/a')}, effective threshold: {ev.get('effective_threshold', 'n/a')}, observed: {ev.get('observed_value', 'n/a')}")
+        elif threshold_source == "custom_settings":
+            note = callout("success", f"Custom dashboard threshold: {ev.get('effective_threshold', 'n/a')} | Observed: {ev.get('observed_value', 'n/a')}")
+        else:
+            note = html.P(f"Global config threshold: {ev.get('effective_threshold', 'n/a')} | Observed: {ev.get('observed_value', 'n/a')}", className="small-muted")
         evidence_items.append(
             html.Details(
                 [html.Summary(f"{alert_row['alert_type']} — {alert_row['alert_id']}"), note, html.Pre(json.dumps(ev, indent=2, default=str))],
