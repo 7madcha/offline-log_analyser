@@ -24,10 +24,6 @@ Additional aliases can be configured under `schema_mapping.aliases` in `config.y
 - Explore results in an interactive Plotly Dash dashboard.
 
 
-## Project File Guide
-
-See PROJECT_EXPLANATION.md for a plain-language explanation of every project file and implemented feature.
-
 ## Architecture
 
 The project is split into small modules under `src/`:
